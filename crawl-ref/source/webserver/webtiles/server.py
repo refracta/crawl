@@ -21,7 +21,7 @@ from tornado.netutil import bind_sockets
 
 import webtiles
 from webtiles import auth, load_games, process_handler, userdb, config
-from webtiles import game_data_handler, util, ws_handler, status
+from webtiles import game_data_handler, server_metrics, util, ws_handler, status
 
 
 servers = None
@@ -752,6 +752,7 @@ async def async_run_server(nonsecure_sockets, secure_sockets):
     # set up various timeout loops
     ws_handler.do_periodic_lobby_updates()
     webtiles.config.init_config_timeouts()
+    server_metrics.start()
 
     bind_server(nonsecure_sockets, secure_sockets)
 

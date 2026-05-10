@@ -91,6 +91,11 @@ defaults = {
     'lobby_update_rate': 2,
     'load_logging_rate': 0,
     'milestone_interval': 1000, # ms
+    'webtiles_metrics_interval': 0,
+    'webtiles_metrics_signal': 'SIGUSR2',
+    'webtiles_metrics_snapshot_dir': None,
+    'webtiles_metrics_tracemalloc': False,
+    'webtiles_metrics_tracemalloc_frames': 15,
     'slow_callback_alert': None,
     'slow_io_alert': 0.250,
     'games': collections.OrderedDict([]),

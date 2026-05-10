@@ -25,7 +25,7 @@ def purge_login_tokens():
 
 def purge_login_tokens_timeout():
     purge_login_tokens()
-    IOLoop.current().add_timeout(time.time() + 60 * 60 * 1000,
+    IOLoop.current().add_timeout(time.time() + 60 * 60,
                                  purge_login_tokens_timeout)
 
 
