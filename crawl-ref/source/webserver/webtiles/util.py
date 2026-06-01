@@ -70,6 +70,12 @@ except:
     pass
 
 
+def _sync_open_and_write(filename, s):
+    with SlowWarning("Slow IO: write '%s'" % filename):
+        with open(filename, "w") as f:
+            f.write(s)
+
+
 @tornado.gen.coroutine
 def open_and_write(filename, s):
     if _aiofiles_available:
@@ -82,9 +88,8 @@ def open_and_write(filename, s):
         finally:
             yield f.close()
     else:
-        with SlowWarning("Slow IO: write '%s'" % filename):
-            with open(filename, "w") as f:
-                f.write(s)
+        yield tornado.ioloop.IOLoop.current().run_in_executor(
+            None, _sync_open_and_write, filename, s)
 
 
 def func_repr(func):
