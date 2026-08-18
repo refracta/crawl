@@ -39,6 +39,7 @@
 #include "god-passive.h"
 #include "hints.h"
 #include "hiscores.h"
+#include "housing.h"
 #include "invent.h"
 #include "item-prop.h"
 #include "items.h"
@@ -1538,6 +1539,9 @@ void player_die(kill_method_type death_type, mid_t source, int dam,
         return;
     }
 #endif
+
+    if (_is_real_death(death_type) && housing_begin_respawn())
+        return;
 
     crawl_state.cancel_cmd_all();
 

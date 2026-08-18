@@ -3236,7 +3236,8 @@ static const map_def *_dgn_random_map_for_place(bool minivault)
         vault = find_map_by_name(you.props[FORCE_MAP_KEY].get_string());
     else if (lid.branch == root_branch && lid.depth == 1
         && (crawl_state.game_is_sprint()
-            || crawl_state.game_is_tutorial()))
+            || crawl_state.game_is_tutorial()
+            || crawl_state.game_is_housing()))
     {
         vault = find_map_by_name(crawl_state.map);
         if (vault == nullptr)

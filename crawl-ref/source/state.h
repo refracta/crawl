@@ -238,6 +238,7 @@ public:
     bool game_is_hints() const;
     bool game_is_hints_tutorial() const;
     bool game_is_descent() const;
+    bool game_is_housing() const;
 
     bool game_has_random_floors() const;
     bool game_saves_prefs() const;

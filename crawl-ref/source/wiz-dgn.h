@@ -19,7 +19,8 @@ dungeon_feature_type wizard_select_feature(bool mimic, bool allow_fprop=false);
 bool wizard_create_feature(const coord_def& pos = you.pos(),
                                     dungeon_feature_type feat=DNGN_UNSEEN,
                                     bool mimic=false);
-bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic);
+bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic,
+                           bool housing_edit=false);
 void wizard_list_branches();
 void wizard_map_level();
 void wizard_place_stairs(bool down);

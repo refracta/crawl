@@ -18,6 +18,7 @@
 #include "evoke.h"
 #include "fight.h"
 #include "god-item.h"
+#include "housing.h"
 #include "invent.h"
 #include "item-prop.h"
 #include "item-use.h"
@@ -1416,6 +1417,8 @@ namespace quiver
             case ABIL_WIZ_BUILD_TERRAIN:
             case ABIL_WIZ_CLEAR_TERRAIN:
 #endif
+            case ABIL_HOUSING_BUILD_TERRAIN:
+            case ABIL_HOUSING_CLEAR_TERRAIN:
                 return true;
             default:
                 return is_dynamic_targeted()
@@ -1481,16 +1484,27 @@ namespace quiver
 
             qdesc.textcolour(quiver_color());
             string abil_name = ability_name(ability);
+            dungeon_feature_type last_feat = DNGN_UNSEEN;
+            bool describe_feature = false;
+            if (ability == ABIL_HOUSING_BUILD_TERRAIN)
+            {
+                last_feat = housing_last_feature();
+                describe_feature = true;
+            }
 #ifdef WIZARD
-            int last_feat = you.props[WIZ_LAST_FEATURE_TYPE_PROP].get_int();
-            if (ability == ABIL_WIZ_BUILD_TERRAIN
-                && last_feat != DNGN_UNSEEN)
+            else if (ability == ABIL_WIZ_BUILD_TERRAIN)
+            {
+                last_feat = static_cast<dungeon_feature_type>(
+                    you.props[WIZ_LAST_FEATURE_TYPE_PROP].get_int());
+                describe_feature = true;
+            }
+#endif
+            if (describe_feature && last_feat != DNGN_UNSEEN)
             {
                 qdesc.cprintf("Build '%s'", dungeon_feature_name(
-                    static_cast<dungeon_feature_type>(last_feat)));
+                    last_feat));
             }
             else
-#endif
                 qdesc.cprintf("%s", ability_name(ability).c_str());
 
             if (is_card_ability(ability))

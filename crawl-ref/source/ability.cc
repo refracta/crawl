@@ -41,6 +41,7 @@
 #include "god-item.h"
 #include "god-passive.h"
 #include "hints.h"
+#include "housing.h"
 #include "invent.h"
 #include "item-prop.h"
 #include "items.h"
@@ -756,6 +757,14 @@ static vector<ability_def> &_get_ability_list()
             0, 0, 0, -1, {fail_basis::invo}, abflag::none },
         { ABIL_CONVERT_TO_BEOGH, "Convert to Beogh",
             0, 0, 0, -1, {fail_basis::invo}, abflag::conf_ok },
+        { ABIL_HOUSING_ACQUIRE, "Acquire a housing item",
+            0, 0, 0, -1, {}, abflag::instant },
+        { ABIL_HOUSING_BUILD_TERRAIN, "Build housing terrain",
+            0, 0, 0, LOS_MAX_RANGE, {}, abflag::instant },
+        { ABIL_HOUSING_SET_TERRAIN, "Set housing terrain to build",
+            0, 0, 0, -1, {}, abflag::instant },
+        { ABIL_HOUSING_CLEAR_TERRAIN, "Clear housing terrain to floor",
+            0, 0, 0, LOS_MAX_RANGE, {}, abflag::instant },
 #ifdef WIZARD
         { ABIL_WIZ_BUILD_TERRAIN, "Build terrain",
             0, 0, 0, LOS_MAX_RANGE, {}, abflag::instant },
@@ -1818,9 +1827,27 @@ static bool _can_rising_flame(bool quiet)
 static bool _check_ability_possible(const ability_def& abil, bool quiet = false)
 {
 #ifdef WIZARD
-    if (abil.ability >= ABIL_FIRST_WIZ)
+    if (abil.ability >= ABIL_FIRST_WIZ && abil.ability <= ABIL_LAST_WIZ)
         return you.wizard;
 #endif
+    if (abil.ability >= ABIL_FIRST_HOUSING
+        && abil.ability <= ABIL_LAST_HOUSING)
+    {
+#ifndef WIZARD
+        if (abil.ability != ABIL_HOUSING_ACQUIRE)
+        {
+            if (!quiet)
+                mpr("Housing terrain editing is unavailable in this build.");
+            return false;
+        }
+#endif
+        if (!housing_is_owner())
+        {
+            if (!quiet)
+                mpr("Only the owner can use housing abilities.");
+            return false;
+        }
+    }
     if (you.confused() && !testbits(abil.flags, abflag::conf_ok))
     {
         if (!quiet)
@@ -4139,6 +4166,67 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
         }
         return spret::abort;
 
+    case ABIL_HOUSING_ACQUIRE:
+        if (!housing_authorize_action("acquire", 0))
+            return spret::abort;
+        if (!acquirement_menu())
+            return spret::abort;
+        housing_checkpoint();
+        break;
+
+    case ABIL_HOUSING_BUILD_TERRAIN:
+#ifdef WIZARD
+    {
+        const auto feat = housing_last_feature();
+        if (!housing_feature_allowed(feat))
+        {
+            mpr("Choose a safe terrain type first.");
+            return spret::abort;
+        }
+        if (!wizard_create_feature(*target, feat, false, true))
+            return spret::abort;
+        housing_checkpoint();
+        break;
+    }
+#else
+        mpr("Housing terrain editing is unavailable in this build.");
+        return spret::abort;
+#endif
+
+    case ABIL_HOUSING_CLEAR_TERRAIN:
+#ifdef WIZARD
+        if (!wizard_create_feature(*target, DNGN_FLOOR, false, true))
+            return spret::abort;
+        housing_checkpoint();
+        break;
+#else
+        mpr("Housing terrain editing is unavailable in this build.");
+        return spret::abort;
+#endif
+
+    case ABIL_HOUSING_SET_TERRAIN:
+#ifdef WIZARD
+    {
+        const auto feat = wizard_select_feature(false);
+        if (feat == DNGN_UNSEEN)
+            return spret::abort;
+        if (!housing_feature_allowed(feat))
+        {
+            mpr("That terrain is not available in Housing.");
+            return spret::abort;
+        }
+        if (!housing_authorize_action("terrain", 0))
+            return spret::abort;
+        housing_set_last_feature(feat);
+        mprf("Now building '%s'", dungeon_feature_name(feat));
+        housing_checkpoint();
+        break;
+    }
+#else
+        mpr("Housing terrain editing is unavailable in this build.");
+        return spret::abort;
+#endif
+
 #ifdef WIZARD
     case ABIL_WIZ_BUILD_TERRAIN:
     {
@@ -4373,9 +4461,18 @@ bool is_card_ability(ability_type abil)
 bool player_has_ability(ability_type abil, bool include_unusable)
 {
 #ifdef WIZARD
-    if (abil >= ABIL_FIRST_WIZ)
+    if (abil >= ABIL_FIRST_WIZ && abil <= ABIL_LAST_WIZ)
         return you.wizard;
 #endif
+
+    if (abil >= ABIL_FIRST_HOUSING && abil <= ABIL_LAST_HOUSING)
+    {
+#ifndef WIZARD
+        if (abil != ABIL_HOUSING_ACQUIRE)
+            return false;
+#endif
+        return housing_is_owner();
+    }
 
     // TODO: consolidate fixup checks into here?
     abil = fixup_ability(abil);
@@ -4528,6 +4625,10 @@ vector<talent> your_talents(bool include_unusable, bool ignore_piety)
             ABIL_END_TRANSFORMATION,
             ABIL_RENOUNCE_RELIGION,
             ABIL_CONVERT_TO_BEOGH,
+            ABIL_HOUSING_ACQUIRE,
+            ABIL_HOUSING_BUILD_TERRAIN,
+            ABIL_HOUSING_SET_TERRAIN,
+            ABIL_HOUSING_CLEAR_TERRAIN,
             ABIL_EVOKE_BLINK,
             ABIL_EVOKE_TURN_INVISIBLE,
             ABIL_EVOKE_DISPATER,
@@ -4750,6 +4851,13 @@ int find_ability_slot(const ability_type abil, char firstletter)
 
     case ABIL_RENOUNCE_RELIGION:
         first_slot = letter_to_index('X');
+        break;
+
+    case ABIL_HOUSING_ACQUIRE:
+    case ABIL_HOUSING_BUILD_TERRAIN:
+    case ABIL_HOUSING_SET_TERRAIN:
+    case ABIL_HOUSING_CLEAR_TERRAIN:
+        first_slot = letter_to_index('H');
         break;
 
 #ifdef WIZARD

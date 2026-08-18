@@ -92,6 +92,11 @@ games:
     name: Descent
     options:
       - -descent
+  - id: housing-web-trunk
+    template: trunk
+    name: Housing
+    options:
+      - -housing
   - id: tut-web-trunk
     template: trunk
     name: Tutorial

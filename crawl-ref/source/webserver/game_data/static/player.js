@@ -395,7 +395,11 @@ function ($, comm, client, enums, map_knowledge, messages, options, util) {
         $("#stats_titleline").text(player.name
                                     + (player.title[0] === "," ? "" : " ")
                                     + player.title);
-        $("#stats_wizmode").text(player.wizard ? "*WIZARD*" : player.explore ? "*EXPLORE*" : "");
+        var mode_label = player.housing_role === "owner" ? "*HOUSE*"
+                       : player.housing_role === "visitor" ? "*VISITOR*"
+                       : player.wizard ? "*WIZARD*"
+                       : player.explore ? "*EXPLORE*" : "";
+        $("#stats_wizmode").text(mode_label);
 
         var species_god = player.species_display_name;
         if (player.god != "")
@@ -485,7 +489,10 @@ function ($, comm, client, enums, map_knowledge, messages, options, util) {
         else
         {
             $("#stats_time_caption").text("Turn:");
-            $("#stats_time").text(player.turn);
+            var turn = (player.housing_role === "owner"
+                        || player.housing_role === "visitor")
+                       ? player.housing_map_turns : player.turn;
+            $("#stats_time").text(turn);
         }
 
         if (player.time_delta)

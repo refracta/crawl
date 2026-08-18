@@ -4247,6 +4247,8 @@ tileidx_t tileidx_gametype(const game_type gtype)
         return TILEG_STARTUP_STONESOUP;
     case GAME_TYPE_DESCENT:
         return TILEG_STARTUP_IRONSOUP;
+    case GAME_TYPE_HOUSING:
+        return TILEG_STARTUP_STONESOUP;
     case GAME_TYPE_TUTORIAL:
         return TILEG_STARTUP_TUTORIAL;
     case GAME_TYPE_HINTS:
@@ -4666,6 +4668,15 @@ tileidx_t tileidx_ability(const ability_type ability)
     // General divine (pseudo) abilities.
     case ABIL_RENOUNCE_RELIGION:
         return TILEG_ABILITY_RENOUNCE_RELIGION;
+
+    case ABIL_HOUSING_ACQUIRE:
+        return TILEG_ABILITY_RENOUNCE_RELIGION;
+    case ABIL_HOUSING_BUILD_TERRAIN:
+        return TILEG_ABILITY_WIZ_BUILD_TERRAIN;
+    case ABIL_HOUSING_SET_TERRAIN:
+        return TILEG_ABILITY_WIZ_SET_TERRAIN;
+    case ABIL_HOUSING_CLEAR_TERRAIN:
+        return TILEG_ABILITY_WIZ_CLEAR_TERRAIN;
 
 #ifdef WIZARD
     case ABIL_WIZ_BUILD_TERRAIN:

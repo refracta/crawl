@@ -45,6 +45,7 @@ struct player_info
     string job_title;
     bool wizard;
     bool explore;
+    string housing_role;
     string species;
     string species_display_name;
     string god;
@@ -82,6 +83,7 @@ struct player_info
     int zot_points;
     int elapsed_time;
     int num_turns;
+    int housing_map_turns;
     int lives, deaths;
 
     string place;

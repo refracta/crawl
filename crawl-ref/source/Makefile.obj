@@ -85,6 +85,7 @@ god-wrath.o \
 hash.o \
 hints.o \
 hiscores.o \
+housing.o \
 initfile.o \
 invent.o \
 item-use.o \
@@ -420,6 +421,7 @@ god-passive.h.o \
 god-type.h.o \
 hash.h.o \
 holy-word-source-type.h.o \
+housing.h.o \
 item-def.h.o \
 item-prop-enum.h.o \
 item-status-flag-type.h.o \

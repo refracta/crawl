@@ -19,6 +19,7 @@
 #include "dungeon.h"
 #include "tile-env.h"
 #include "files.h"
+#include "housing.h"
 #include "libutil.h"
 #include "maps.h"
 #include "map-knowledge.h"
@@ -278,8 +279,15 @@ bool wizard_create_feature(const coord_def& pos, dungeon_feature_type feat, bool
     return wizard_create_feature(t, feat, mimic);
 }
 
-bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic)
+bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic,
+                           bool housing_edit)
 {
+    if (housing_edit && !housing_feature_allowed(feat))
+    {
+        mpr("That terrain is not available in Housing.");
+        return false;
+    }
+
     if (feat == DNGN_UNSEEN)
     {
         feat = wizard_select_feature(mimic, target.target == you.pos());
@@ -290,6 +298,7 @@ bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic)
 
     const bool targeting_mode = target.needs_targeting();
 
+    bool changed = false;
     do
     {
         if (targeting_mode)
@@ -314,9 +323,22 @@ bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic)
                 args.unrestricted = true; // work with xray vision
             direction(target, args);
             if (target.isCancel || !target.isValid)
-                return false;
+                return housing_edit && changed;
         }
         coord_def &pos = target.target;
+
+        if (housing_edit)
+        {
+            if (!housing_can_edit(pos))
+            {
+                mpr("That square is protected in Housing.");
+                if (!targeting_mode)
+                    return false;
+                continue;
+            }
+            if (!housing_authorize_action("terrain", 0))
+                return changed;
+        }
 
         bool done = false;
         bool success = false;
@@ -332,6 +354,7 @@ bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic)
             env.grid_colours(pos) = 0;
             dungeon_terrain_changed(pos, feat, false, false, true);
             tile_init_flavour(pos);
+            changed = true;
             if (pos == you.pos() && cell_is_solid(pos))
                 you.wizmode_teleported_into_rock = true;
         }

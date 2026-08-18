@@ -49,12 +49,15 @@ void initialise_branch_depths()
     for (branch_iterator it; it; ++it)
         brentry[it->id].clear();
 
-    if (crawl_state.game_is_sprint())
+    if (crawl_state.game_is_sprint() || crawl_state.game_is_housing())
     {
         brdepth.init(-1);
         brdepth[BRANCH_DUNGEON] = 1;
-        brdepth[BRANCH_CRUCIBLE] = 1;
-        brdepth[BRANCH_ARENA] = 1;
+        if (crawl_state.game_is_sprint())
+        {
+            brdepth[BRANCH_CRUCIBLE] = 1;
+            brdepth[BRANCH_ARENA] = 1;
+        }
         return;
     }
 

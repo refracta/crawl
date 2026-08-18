@@ -230,7 +230,8 @@ static map<string, game_type> _game_modes()
         {"arena", GAME_TYPE_ARENA},
         {"sprint", GAME_TYPE_SPRINT},
         {"tutorial", GAME_TYPE_TUTORIAL},
-        {"hints", GAME_TYPE_HINTS}
+        {"hints", GAME_TYPE_HINTS},
+        {"housing", GAME_TYPE_HOUSING}
     };
     if (Version::ReleaseType == VER_ALPHA)
         modes["descent"] = GAME_TYPE_DESCENT;
@@ -1275,6 +1276,8 @@ string gametype_to_str(game_type type)
         return "hints";
     case GAME_TYPE_DESCENT:
         return "descent";
+    case GAME_TYPE_HOUSING:
+        return "housing";
     default:
         return "none";
     }
@@ -4854,6 +4857,7 @@ enum commandline_option_type
     CLO_GAMETYPES_JSON,
     CLO_EDIT_BONES,
     CLO_DESCENT,
+    CLO_HOUSING,
 #if defined(UNIX) || defined(USE_TILE_LOCAL)
     CLO_HEADLESS,
 #endif
@@ -4909,7 +4913,7 @@ static const char *cmd_ops[] =
     "print-charset", "tutorial", "wizard", "explore", "no-save",
     "no-player-bones", "gdb", "no-gdb", "nogdb", "throttle", "no-throttle",
     "lua-max-memory", "playable-json", "branches-json", "save-json",
-    "gametypes-json", "bones", "descent",
+    "gametypes-json", "bones", "descent", "housing",
 #if defined(UNIX) || defined(USE_TILE_LOCAL)
     "headless",
 #endif
@@ -5645,6 +5649,8 @@ static string _gametype_to_clo(game_type g)
         return cmd_ops[CLO_SPRINT];
     case GAME_TYPE_DESCENT: // no CLO?
         return cmd_ops[CLO_DESCENT];
+    case GAME_TYPE_HOUSING:
+        return cmd_ops[CLO_HOUSING];
     case GAME_TYPE_HINTS: // no CLO?
     case GAME_TYPE_NORMAL:
     default:
@@ -6188,6 +6194,11 @@ bool parse_args(int argc, char **argv, bool rc_only)
         case CLO_DESCENT:
             if (!rc_only)
                 Options.game.type = GAME_TYPE_DESCENT;
+            break;
+
+        case CLO_HOUSING:
+            if (!rc_only)
+                Options.game.type = GAME_TYPE_HOUSING;
             break;
 
         case CLO_SPRINT_MAP:

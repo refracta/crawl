@@ -1023,7 +1023,8 @@ bool choose_game(newgame_def& ng, newgame_def& choice,
     ng.map  = choice.map;
 
     if (ng.type == GAME_TYPE_SPRINT
-        || ng.type == GAME_TYPE_TUTORIAL)
+        || ng.type == GAME_TYPE_TUTORIAL
+        || ng.type == GAME_TYPE_HOUSING)
     {
         _choose_gamemode_map(ng, choice, defaults);
     }
@@ -2320,8 +2321,18 @@ static void _resolve_gamemode_map(newgame_def& ng, const newgame_def& ng_choice,
 static void _choose_gamemode_map(newgame_def& ng, newgame_def& ng_choice,
                                  const newgame_def& defaults)
 {
-    // Sprint, otherwise Tutorial.
+    // Sprint, Tutorial, or Housing.
     const bool is_sprint = (ng_choice.type == GAME_TYPE_SPRINT);
+
+    // Housing currently has exactly one canonical owner map. Do not allow an
+    // rc `map` setting to substitute an arbitrary vault with stairs, markers,
+    // or other state outside the Housing invariants.
+    if (ng_choice.type == GAME_TYPE_HOUSING)
+    {
+        ng_choice.map = "housing_main";
+        ng.map = ng_choice.map;
+        return;
+    }
 
     const string type_name = gametype_to_str(ng_choice.type);
 

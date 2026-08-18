@@ -24,6 +24,7 @@
 #include "files.h"
 #include "god-abil.h"
 #include "god-passive.h"
+#include "housing.h"
 #include "initfile.h"
 #include "invent.h"
 #include "item-name.h"
@@ -681,7 +682,8 @@ void update_turn_count()
     textcolour(HUD_VALUE_COLOUR);
     string time = Options.show_game_time
         ? make_stringf("%.1f", you.elapsed_time / 10.0)
-        : make_stringf("%d", you.num_turns);
+        : make_stringf("%d", crawl_state.game_is_housing()
+                                ? housing_map_turns() : you.num_turns);
 
     if (!_is_using_small_layout())
     {
@@ -1444,9 +1446,13 @@ static void _redraw_title()
 
     // Line 1: Foo the Bar    *WIZARD*
     CGOTOXY(1, 1, GOTO_STAT);
-    textcolour(small_layout && (you.wizard || you.explore) ? LIGHTMAGENTA : YELLOW);
+    textcolour(small_layout
+               && (you.wizard || you.explore || crawl_state.game_is_housing())
+                   ? LIGHTMAGENTA : YELLOW);
     CPRINTF("%s", chop_string(title, WIDTH).c_str());
-    if (you.wizard && !small_layout)
+    if (crawl_state.game_is_housing() && !small_layout)
+        _draw_wizmode_flag(housing_is_owner() ? "HOUSE" : "VISITOR");
+    else if (you.wizard && !small_layout)
         _draw_wizmode_flag("WIZARD");
     else if (you.suppress_wizard && !small_layout)
         _draw_wizmode_flag("EX-WIZARD");
@@ -2193,7 +2199,9 @@ static string _overview_screen_title(int sw)
                                       get_job_name(you.char_class));
 
     handle_real_time();
-    string time_turns = make_stringf(" Turns: %d, Time: ", you.num_turns)
+    const int displayed_turns = crawl_state.game_is_housing()
+                              ? housing_map_turns() : you.num_turns;
+    string time_turns = make_stringf(" Turns: %d, Time: ", displayed_turns)
                       + make_time_string(you.real_time(), true);
 
     const int char_width = strwidth(species_job);

@@ -26,6 +26,7 @@
 #include "english.h"
 #include "env.h"
 #include "files.h"
+#include "housing.h"
 #include "invent.h"
 #include "item-name.h"
 #include "item-prop.h" // is_weapon()
@@ -1152,6 +1153,8 @@ void TilesFramework::_send_player(bool force_full)
                    "title");
     _update_int(force_full, c.wizard, you.wizard, "wizard");
     _update_int(force_full, c.explore, you.explore, "explore");
+    _update_string(force_full, c.housing_role, housing_role_name(),
+                   "housing_role");
     _update_string(force_full, c.species, species::name(you.species),
                    "species");
     _update_string(force_full, c.species_display_name, player_species_name(),
@@ -1239,6 +1242,8 @@ void TilesFramework::_send_player(bool force_full)
             tiles.json_write_int("time_last_input", you.elapsed_time_at_last_input);
 
         _update_int(force_full, c.num_turns, you.num_turns, "turn");
+        _update_int(force_full, c.housing_map_turns, housing_map_turns(),
+                    "housing_map_turns");
     }
 
     const PlaceInfo& place = you.get_place_info();

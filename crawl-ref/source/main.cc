@@ -75,6 +75,7 @@
 #include "god-prayer.h"
 #include "hints.h"
 #include "hiscores.h"
+#include "housing.h"
 #include "initfile.h"
 #include "invent.h"
 #include "item-name.h"
@@ -485,7 +486,11 @@ NORETURN static void _launch_game()
     level_change();
 
     // Initialise save game so we can recover from crashes on D:1.
-    save_game_state();
+    housing_reset_map_turns();
+    if (crawl_state.game_is_housing())
+        housing_checkpoint();
+    else
+        save_game_state();
 
 #ifdef USE_TILE_WEB
     // Send initial game state before we do any UI updates
@@ -528,6 +533,7 @@ static void _show_commandline_options_help()
     puts("  -version              Crawl version (and compilation info)");
     puts("  -save-version <name>  Save file version for the given player");
     puts("  -sprint               select Sprint");
+    puts("  -housing              select Housing");
     puts("  -sprint-map <name>    preselect a Sprint map");
     puts("  -tutorial             select the Tutorial");
 #ifdef WIZARD
@@ -1097,7 +1103,8 @@ static void _input()
     if (you.pending_revival)
     {
         revive();
-        bring_to_safety();
+        if (!housing_respawn())
+            bring_to_safety();
         redraw_screen();
         update_screen();
     }
