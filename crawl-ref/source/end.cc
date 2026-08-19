@@ -55,6 +55,8 @@ using namespace ui;
  */
 bool crawl_should_restart(game_exit exit)
 {
+    if (exit == game_exit::housing_transition)
+        return true;
 #ifdef DGAMELAUNCH
     UNUSED(exit);
     return false;
@@ -253,6 +255,7 @@ static string _exit_type_to_string(game_exit e)
         case game_exit::quit:    return "quit";
         case game_exit::death:   return "dead";
         case game_exit::save:    return "save";
+        case game_exit::housing_transition: return "housing transition";
         case game_exit::abort:   return "abort";
         case game_exit::crash:   return "crash";
     }

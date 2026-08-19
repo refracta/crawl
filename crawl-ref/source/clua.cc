@@ -8,6 +8,7 @@
 #include "dlua.h"
 #include "end.h"
 #include "files.h"
+#include "housing.h"
 #include "libutil.h"
 #include "l-libs.h"
 #include "maybe-bool.h"
@@ -152,6 +153,8 @@ void CLua::save(writer &outf)
 
 void CLua::save_persist()
 {
+    if (housing_is_visitor())
+        return;
     string persist;
     // We load persist.lua immediately before calling c_save_persist so
     // that we know that it hasn't been overwritten by a player version.

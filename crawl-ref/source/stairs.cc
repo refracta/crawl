@@ -758,14 +758,27 @@ void rise_through_ceiling()
         dungeon_terrain_changed(you.pos(), DNGN_TRAP_SHAFT);
 }
 
-static void _clear_level_bound_player_state()
+void clear_level_bound_player_state(bool preserve_mesmerise_immunity)
 {
     you.stop_being_caught(true);
     stop_channelling_spells();
     you.stop_constricting_all();
     you.stop_being_constricted();
-    you.clear_beholders();
-    you.clear_fearmongers();
+    if (preserve_mesmerise_immunity)
+    {
+        // Housing hops preserve portable character state. The ordinary clear
+        // helpers grant fresh random immunity, which would let portals reroll a
+        // beneficial duration on every visitor->visitor transition.
+        you.beholders.clear();
+        you.duration[DUR_MESMERISED] = 0;
+        you.fearmongers.clear();
+        you.duration[DUR_AFRAID] = 0;
+    }
+    else
+    {
+        you.clear_beholders();
+        you.clear_fearmongers();
+    }
     remove_ice_movement();
     if (you.duration[DUR_OOZEMANCY])
         jiyva_end_oozemancy();
@@ -831,7 +844,7 @@ void floor_transition(dungeon_feature_type how,
         player_did_deliberate_movement();
 
     // Magical level changes (which currently only exist "downwards") need this.
-    _clear_level_bound_player_state();
+    clear_level_bound_player_state();
 
     // Fire level-leaving trigger.
     leaving_level_now(how);
@@ -1165,12 +1178,6 @@ void take_stairs(dungeon_feature_type force_stair, bool going_up,
     // marker as an ordinary portal vault destination.
     if (!force_stair && how == DNGN_ENTER_PORTAL_VAULT)
     {
-        // A visitor->visitor handoff preserves portable character state, but
-        // effects tied to actors or terrain on the old map must end exactly as
-        // they do during a normal level transition. Do this only after the
-        // marker passes strict validation; malformed portals must be inert.
-        if (housing_portal_is_valid(you.pos()))
-            _clear_level_bound_player_state();
         if (housing_take_portal(you.pos()))
             return;
     }

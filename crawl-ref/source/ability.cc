@@ -768,6 +768,8 @@ static vector<ability_def> &_get_ability_list()
         { ABIL_HOUSING_CREATE_PORTAL, "Create a housing portal",
             0, 0, 0, LOS_MAX_RANGE, {},
             abflag::instant | abflag::target },
+        { ABIL_HOUSING_RETURN_HOME, "Return home",
+            0, 0, 0, -1, {}, abflag::instant },
 #ifdef WIZARD
         { ABIL_WIZ_BUILD_TERRAIN, "Build terrain",
             0, 0, 0, LOS_MAX_RANGE, {}, abflag::instant },
@@ -1836,20 +1838,32 @@ static bool _check_ability_possible(const ability_def& abil, bool quiet = false)
     if (abil.ability >= ABIL_FIRST_HOUSING
         && abil.ability <= ABIL_LAST_HOUSING)
     {
-#ifndef WIZARD
-        if (abil.ability != ABIL_HOUSING_ACQUIRE
-            && abil.ability != ABIL_HOUSING_CREATE_PORTAL)
+        if (abil.ability == ABIL_HOUSING_RETURN_HOME)
         {
-            if (!quiet)
-                mpr("Housing terrain editing is unavailable in this build.");
-            return false;
+            if (!housing_is_visitor())
+            {
+                if (!quiet)
+                    mpr("Only a visitor can return home this way.");
+                return false;
+            }
         }
-#endif
-        if (!housing_is_owner())
+        else
         {
-            if (!quiet)
-                mpr("Only the owner can use housing abilities.");
-            return false;
+#ifndef WIZARD
+            if (abil.ability != ABIL_HOUSING_ACQUIRE
+                && abil.ability != ABIL_HOUSING_CREATE_PORTAL)
+            {
+                if (!quiet)
+                    mpr("Housing terrain editing is unavailable in this build.");
+                return false;
+            }
+#endif
+            if (!housing_is_owner())
+            {
+                if (!quiet)
+                    mpr("Only the owner can use housing abilities.");
+                return false;
+            }
         }
     }
     if (you.confused() && !testbits(abil.flags, abflag::conf_ok))
@@ -4249,6 +4263,11 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
         break;
     }
 
+    case ABIL_HOUSING_RETURN_HOME:
+        if (!housing_return_home())
+            return spret::abort;
+        return spret::success;
+
 #ifdef WIZARD
     case ABIL_WIZ_BUILD_TERRAIN:
     {
@@ -4489,6 +4508,8 @@ bool player_has_ability(ability_type abil, bool include_unusable)
 
     if (abil >= ABIL_FIRST_HOUSING && abil <= ABIL_LAST_HOUSING)
     {
+        if (abil == ABIL_HOUSING_RETURN_HOME)
+            return housing_is_visitor();
 #ifndef WIZARD
         if (abil != ABIL_HOUSING_ACQUIRE
             && abil != ABIL_HOUSING_CREATE_PORTAL)
@@ -4653,6 +4674,7 @@ vector<talent> your_talents(bool include_unusable, bool ignore_piety)
             ABIL_HOUSING_SET_TERRAIN,
             ABIL_HOUSING_CLEAR_TERRAIN,
             ABIL_HOUSING_CREATE_PORTAL,
+            ABIL_HOUSING_RETURN_HOME,
             ABIL_EVOKE_BLINK,
             ABIL_EVOKE_TURN_INVISIBLE,
             ABIL_EVOKE_DISPATER,
@@ -4883,6 +4905,10 @@ int find_ability_slot(const ability_type abil, char firstletter)
     case ABIL_HOUSING_CLEAR_TERRAIN:
     case ABIL_HOUSING_CREATE_PORTAL:
         first_slot = letter_to_index('H');
+        break;
+
+    case ABIL_HOUSING_RETURN_HOME:
+        first_slot = letter_to_index('R');
         break;
 
 #ifdef WIZARD

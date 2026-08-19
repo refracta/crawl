@@ -10,6 +10,10 @@ enum class game_exit
     quit,
     death,
     save,
+    // Restart Crawl's game state without ending the process or its WebTiles
+    // connection. Housing uses this to restore either the canonical owner
+    // checkpoint or a retained visitor rollback package in the same process.
+    housing_transition,
     abort, // used when a game is aborted before it starts, e.g.
            // when exiting character selection, or aborting a text
            // entry.

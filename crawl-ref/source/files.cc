@@ -2125,7 +2125,7 @@ bool load_level(dungeon_feature_type stair_taken, load_mode_type load_mode,
 
     // Did we get here by popping the level stack?
     bool popped = false;
-    if (load_mode != LOAD_VISITOR)
+    if (load_mode != LOAD_VISITOR && load_mode != LOAD_HOUSING_REPLACE)
         popped = _leave_level(stair_taken, old_level, &return_pos);
 
     unwind_var<dungeon_feature_type> stair(
@@ -2250,6 +2250,13 @@ bool load_level(dungeon_feature_type stair_taken, load_mode_type load_mode,
 
     los_changed();
 
+    // Housing replaces a same-id public level, so the old character coordinate
+    // has no meaning. Place the visitor before marker activation, travel/tile
+    // initialisation, DET_ENTERED_LEVEL, and the first redraw; observers never
+    // see a transient player position from the previous map.
+    if (load_mode == LOAD_HOUSING_REPLACE)
+        housing_finish_map_entry();
+
     if (load_mode != LOAD_VISITOR)
         you.set_level_visited(level_id::current());
 
@@ -2264,7 +2271,8 @@ bool load_level(dungeon_feature_type stair_taken, load_mode_type load_mode,
     // Markers must be activated early, since they may rely on
     // events issued later, e.g. DET_ENTERING_LEVEL or
     // the DET_TURN_ELAPSED from update_level.
-    if (make_changes || load_mode == LOAD_RESTART_GAME)
+    if (make_changes || load_mode == LOAD_RESTART_GAME
+        || load_mode == LOAD_HOUSING_REPLACE)
     {
         bool message = !(load_mode == LOAD_RESTART_GAME && descent_peek);
         env.markers.activate_all(message);
@@ -2317,9 +2325,15 @@ bool load_level(dungeon_feature_type stair_taken, load_mode_type load_mode,
         travel_cache.flush_invalid_waypoints();
         tile_new_level(just_created_level);
     }
-    else if (load_mode == LOAD_RESTART_GAME)
+    else if (load_mode == LOAD_RESTART_GAME
+             || load_mode == LOAD_HOUSING_REPLACE)
     {
-        _rescue_player_from_wall();
+        // A Housing replacement deliberately ignores the old map coordinate;
+        // housing_finish_map_entry() places the character on a validated spawn
+        // immediately after load. Running the generic wall rescue first can
+        // assert on that stale coordinate and produces a misleading warning.
+        if (load_mode == LOAD_RESTART_GAME)
+            _rescue_player_from_wall();
         // Travel needs initialize some things on reload, too.
         travel_init_load_level();
     }
@@ -2649,23 +2663,12 @@ static void _save_game_exit()
     update_whereis("saved");
 
 #ifdef USE_TILE_WEB
-    const bool housing_handoff = housing_transition_pending();
-    if (!housing_handoff)
-        tiles.send_exit_reason("saved");
+    tiles.send_exit_reason("saved");
 #endif
 
     delete you.save;
     you.save = 0;
 
-#ifdef USE_TILE_WEB
-    // A Housing handoff becomes visible to the server only after the package
-    // destructor has committed, truncated, unlocked, and closed the save.
-    if (housing_handoff)
-    {
-        housing_send_pending_transition();
-        tiles.send_exit_reason("saved");
-    }
-#endif
 }
 
 void save_game(bool leave_game, const char *farewellmsg)

@@ -41,6 +41,7 @@
 #include "cio.h"
 #include "command.h"
 #include "files.h"
+#include "housing.h"
 #include "initfile.h"
 #include "libutil.h"
 #include "menu.h"
@@ -675,6 +676,14 @@ void macro_clear_buffers()
     macro_keys_left = -1;
 }
 
+void macro_clear_mappings()
+{
+    macro_clear_buffers();
+    for (macromap *mapping : all_maps)
+        mapping->clear();
+    crawl_state.unsaved_macros = false;
+}
+
 bool is_processing_macro()
 {
     return macro_keys_left >= 0;
@@ -783,6 +792,8 @@ static void write_map(FILE *f, const macromap &mp, const char *key)
  */
 void macro_save()
 {
+    if (housing_is_visitor())
+        return;
     FILE *f;
     const string macrofile = get_macro_file();
     f = fopen_u(macrofile.c_str(), "w");

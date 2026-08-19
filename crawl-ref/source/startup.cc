@@ -1016,6 +1016,7 @@ static bool _exit_type_allows_menu_bypass(game_exit exit)
     return exit == game_exit::death
         || exit == game_exit::win
         || exit == game_exit::unknown
+        || exit == game_exit::housing_transition
         || exit == game_exit::leave
         || (exit == game_exit::quit && Options.newgame_after_quit);
 }

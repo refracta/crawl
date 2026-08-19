@@ -49,10 +49,14 @@ bool housing_valid_map_target(const string &target);
 bool housing_create_portal(const coord_def &pos, const string &target);
 bool housing_portal_is_valid(const coord_def &pos);
 // Returns true if the square was a Housing portal (including malformed ones).
-// A successful WebTiles transition does not return.
+// A valid portal is resolved and loaded by the Crawl process. Foreign maps
+// keep the current visitor character; returning home restores the exact owner
+// checkpoint without replacing the process or WebSocket.
 bool housing_take_portal(const coord_def &pos);
-bool housing_transition_pending();
-void housing_send_pending_transition();
+// Discard a visitor session and restore the canonical owner checkpoint without
+// replacing the Crawl process. Returns false, with a user-facing error, if the
+// canonical save/context cannot be opened; success does not return.
+bool housing_return_home();
 
 // Commit both the character and current map for an owner session.
 void housing_checkpoint();

@@ -20,6 +20,7 @@ enum load_mode_type
 {
     LOAD_START_GAME,            // game has just begun
     LOAD_RESTART_GAME,          // loaded savefile
+    LOAD_HOUSING_REPLACE,       // same character, replacement Housing map
     LOAD_ENTER_LEVEL,           // entered a level normally
     LOAD_VISITOR,               // Visitor pattern to see all levels
 };

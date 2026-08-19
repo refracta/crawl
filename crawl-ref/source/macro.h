@@ -54,6 +54,9 @@ void macro_init();
 void macro_save();
 
 void macro_clear_buffers();
+// Clear user mappings as well as pending input. Housing uses this before
+// reloading the canonical owner context after a disposable visit.
+void macro_clear_mappings();
 
 void macro_userfn(const char *keys, const char *registryname);
 
