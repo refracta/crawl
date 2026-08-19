@@ -778,6 +778,12 @@ static vector<ability_def> &_get_ability_list()
             0, 0, 0, -1, {}, abflag::instant },
         { ABIL_HOUSING_TRAVEL_TO_MAP, "Travel to a housing map",
             0, 0, 0, -1, {}, abflag::instant },
+        { ABIL_HOUSING_TOGGLE_VISITOR_WALL, "Toggle an owner-only barrier",
+            0, 0, 0, LOS_MAX_RANGE, {},
+            abflag::instant | abflag::target | abflag::not_self },
+        { ABIL_HOUSING_MANAGE_SPAWNS, "Toggle a housing spawn point",
+            0, 0, 0, LOS_MAX_RANGE, {},
+            abflag::instant | abflag::target | abflag::not_self },
 #ifdef WIZARD
         { ABIL_WIZ_BUILD_TERRAIN, "Build terrain",
             0, 0, 0, LOS_MAX_RANGE, {}, abflag::instant },
@@ -2723,6 +2729,13 @@ unique_ptr<targeter> find_ability_targeter(ability_type ability)
 {
     switch (ability)
     {
+    case ABIL_HOUSING_TOGGLE_VISITOR_WALL:
+        return make_unique<targeter_smite>(&you, ability_range(ability),
+                                            0, 0, true, true, false);
+    case ABIL_HOUSING_MANAGE_SPAWNS:
+        return make_unique<targeter_smite>(&you, ability_range(ability),
+                                            0, 0, true, false, false);
+
     // Limited radius:
     case ABIL_ZIN_SANCTUARY:
     case ABIL_YRED_FATHOMLESS_SHACKLES:
@@ -3020,7 +3033,9 @@ bool activate_talent(const talent& tal, dist *target)
         args.hitfunc = hitfunc.get();
         args.restricts = testbits(abil.flags, abflag::target) ? DIR_ENFORCE_RANGE
                                                               : DIR_NONE;
-        args.mode = TARG_HOSTILE;
+        args.mode = abil.ability >= ABIL_FIRST_HOUSING
+                    && abil.ability <= ABIL_LAST_HOUSING
+                        ? TARG_ANY : TARG_HOSTILE;
         args.range = range;
         args.needs_path = !testbits(abil.flags, abflag::target);
         args.top_prompt = make_stringf("%s: <w>%s</w>",
@@ -4286,11 +4301,8 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
         return housing_manage_maps() ? spret::success : spret::abort;
 
     case ABIL_HOUSING_CREATE_MONSTER:
-        if (!housing_authorize_action("create a monster", 0)
-            || !housing_create_monster())
-        {
+        if (!housing_create_monster())
             return spret::abort;
-        }
         housing_checkpoint();
         return spret::success;
 
@@ -4316,6 +4328,18 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
         return housing_travel_to_target(destination) ? spret::success
                                                      : spret::abort;
     }
+
+    case ABIL_HOUSING_TOGGLE_VISITOR_WALL:
+        if (!target || !housing_toggle_visitor_wall(target->target))
+            return spret::abort;
+        housing_checkpoint();
+        return spret::success;
+
+    case ABIL_HOUSING_MANAGE_SPAWNS:
+        if (!target || !housing_toggle_spawn_point(target->target))
+            return spret::abort;
+        housing_checkpoint();
+        return spret::success;
 
 #ifdef WIZARD
     case ABIL_WIZ_BUILD_TERRAIN:
@@ -4731,6 +4755,8 @@ vector<talent> your_talents(bool include_unusable, bool ignore_piety)
             ABIL_HOUSING_CREATE_MONSTER,
             ABIL_HOUSING_CALL_MERCHANT,
             ABIL_HOUSING_TRAVEL_TO_MAP,
+            ABIL_HOUSING_TOGGLE_VISITOR_WALL,
+            ABIL_HOUSING_MANAGE_SPAWNS,
             ABIL_EVOKE_BLINK,
             ABIL_EVOKE_TURN_INVISIBLE,
             ABIL_EVOKE_DISPATER,
@@ -4978,6 +5004,14 @@ int find_ability_slot(const ability_type abil, char firstletter)
 
     case ABIL_HOUSING_TRAVEL_TO_MAP:
         first_slot = letter_to_index('T');
+        break;
+
+    case ABIL_HOUSING_TOGGLE_VISITOR_WALL:
+        first_slot = letter_to_index('W');
+        break;
+
+    case ABIL_HOUSING_MANAGE_SPAWNS:
+        first_slot = letter_to_index('P');
         break;
 
 #ifdef WIZARD

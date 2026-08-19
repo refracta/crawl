@@ -1302,6 +1302,9 @@ namespace quiver
         // it from the `a` menu, just not from the quiver.
         // (What abilities are missing here?)
 
+        if (abil >= ABIL_FIRST_HOUSING && abil <= ABIL_LAST_HOUSING)
+            return true;
+
         if (get_dist_to_nearest_monster() > ability_range(abil)
             && (get_ability_flags(abil) & abflag::targeting_mask))
 
@@ -1420,6 +1423,7 @@ namespace quiver
             case ABIL_HOUSING_BUILD_TERRAIN:
             case ABIL_HOUSING_CLEAR_TERRAIN:
             case ABIL_HOUSING_CREATE_PORTAL:
+            case ABIL_HOUSING_MANAGE_SPAWNS:
                 return true;
             default:
                 return is_dynamic_targeted()

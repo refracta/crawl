@@ -4689,6 +4689,10 @@ tileidx_t tileidx_ability(const ability_type ability)
         return TILEG_ABILITY_GOZAG_CALL_MERCHANT;
     case ABIL_HOUSING_TRAVEL_TO_MAP:
         return TILEG_ABILITY_WIZ_BUILD_TERRAIN;
+    case ABIL_HOUSING_TOGGLE_VISITOR_WALL:
+        return TILEG_ABILITY_WIZ_BUILD_TERRAIN;
+    case ABIL_HOUSING_MANAGE_SPAWNS:
+        return TILEG_ABILITY_WIZ_BUILD_TERRAIN;
 
 #ifdef WIZARD
     case ABIL_WIZ_BUILD_TERRAIN:

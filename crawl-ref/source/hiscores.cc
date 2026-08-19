@@ -30,6 +30,7 @@
 #include "end.h"
 #include "english.h"
 #include "files.h"
+#include "housing.h"
 #include "initfile.h"
 #include "item-prop.h"
 #include "item-status-flag-type.h"
@@ -3227,6 +3228,9 @@ static xlog_fields _xlog_status(const char *status)
     xlog_fields xl = se.get_fields();
     xl.add_field("time", "%s", make_date_string(time(nullptr)).c_str());
     xl.add_field("status", "%s", status ? status : "");
+    const string housing_location = housing_place();
+    if (!housing_location.empty())
+        xl.add_field("housing_place", "%s", housing_location.c_str());
     return xl.xlog_line();
 }
 #endif

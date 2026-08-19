@@ -1886,6 +1886,13 @@ void ShoppingList::del_thing_at_indices(C const &idxs)
 
 void ShoppingList::del_things_from(const level_id &lid)
 {
+    // Startup resets the global ShoppingList object before TAG_YOU restores
+    // its backing player property. Housing's map-transition scrub runs at
+    // that restore-safe boundary, before the ordinary post-init refresh.
+    // Bind lazily so an initial URL visit cannot dereference a null cache.
+    if (!list)
+        refresh();
+
     for (unsigned int i = 0; i < list->size(); i++)
     {
         const CrawlHashTable &thing = (*list)[i];

@@ -3756,16 +3756,30 @@ bool housing_call_merchant()
 
     // The ordinary Gozag ability deliberately keeps generated offers in
     // player properties across prompts and HUPs. Housing borrows only the
-    // generator: restore the complete property table on every exit so a free
-    // Housing shop cannot consume or replace a real Gozag offer.
-    unwind_var<CrawlHashTable> restore_player_props(you.props);
+    // generator, so preserve just those offer keys. Reassigning the complete
+    // property table invalidates ShoppingList's cached pointer into
+    // `shopping_list_key` and crashes on the first shop view/entry.
+    vector<string> offer_keys;
+    map<string, CrawlStoreValue> saved_offer_props;
     for (int i = 0; i < GOZAG_MAX_SHOPS; ++i)
     {
-        you.props.erase(make_stringf(GOZAG_SHOPKEEPER_NAME_KEY, i));
-        you.props.erase(make_stringf(GOZAG_SHOP_TYPE_KEY, i));
-        you.props.erase(make_stringf(GOZAG_SHOP_SUFFIX_KEY, i));
-        you.props.erase(make_stringf(GOZAG_SHOP_COST_KEY, i));
+        offer_keys.push_back(make_stringf(GOZAG_SHOPKEEPER_NAME_KEY, i));
+        offer_keys.push_back(make_stringf(GOZAG_SHOP_TYPE_KEY, i));
+        offer_keys.push_back(make_stringf(GOZAG_SHOP_SUFFIX_KEY, i));
+        offer_keys.push_back(make_stringf(GOZAG_SHOP_COST_KEY, i));
     }
+    for (const string &key : offer_keys)
+    {
+        if (you.props.exists(key))
+            saved_offer_props.emplace(key, you.props[key]);
+        you.props.erase(key);
+    }
+    unwinder restore_offer_props = [&]() {
+        for (const string &key : offer_keys)
+            you.props.erase(key);
+        for (const auto &entry : saved_offer_props)
+            you.props[entry.first] = entry.second;
+    };
 
     vector<shop_type> valid_shops;
     for (int i = 0; i < NUM_SHOPS; ++i)
@@ -3783,13 +3797,6 @@ bool housing_call_merchant()
         return false;
 
     _gozag_place_shop(shop_index, false);
-    for (int i = 0; i < GOZAG_MAX_SHOPS; ++i)
-    {
-        you.props.erase(make_stringf(GOZAG_SHOPKEEPER_NAME_KEY, i));
-        you.props.erase(make_stringf(GOZAG_SHOP_TYPE_KEY, i));
-        you.props.erase(make_stringf(GOZAG_SHOP_SUFFIX_KEY, i));
-        you.props.erase(make_stringf(GOZAG_SHOP_COST_KEY, i));
-    }
     return true;
 }
 

@@ -2256,7 +2256,8 @@ bool load_level(dungeon_feature_type stair_taken, load_mode_type load_mode,
     // initialisation, DET_ENTERED_LEVEL, and the first redraw; observers never
     // see a transient player position from the previous map.
     if (load_mode == LOAD_HOUSING_REPLACE
-        || housing_owner_restore_is_staged())
+        || housing_owner_restore_is_staged()
+        || (load_mode == LOAD_RESTART_GAME && housing_is_visitor()))
         housing_finish_map_entry();
 
     if (load_mode != LOAD_VISITOR)
@@ -3403,7 +3404,7 @@ static bool _restore_game(const string& filename)
         load_dlua_errors(inf);
     }
 
-    housing_scrub_visitor_transition_state();
+    housing_prepare_map_transition_restore();
 
     // Handle somebody SIGHUP'ing out of the skill menu with every skill
     // disabled. Doing this here rather in tags code because it can trigger

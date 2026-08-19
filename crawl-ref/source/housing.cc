@@ -20,6 +20,7 @@
 #include <vector>
 
 #ifndef TARGET_OS_WINDOWS
+#include <fcntl.h>
 #include <sys/stat.h>
 #endif
 
@@ -31,13 +32,16 @@
 #include "coordit.h"
 #include "delay.h"
 #include "dgn-overview.h"
+#include "directn.h"
 #include "end.h"
 #include "env.h"
 #include "errors.h"
 #include "files.h"
 #include "god-companions.h"
 #include "god-passive.h"
+#include "hiscores.h"
 #include "initfile.h"
+#include "mapdef.h"
 #include "mapmark.h"
 #include "macro.h"
 #include "menu.h"
@@ -62,11 +66,15 @@
 #include "shopping.h"
 #include "syscalls.h"
 #include "tags.h"
+#include "target.h"
 #include "teleport.h"
 #include "terrain.h"
+#include "tile-env.h"
+#include "tileview.h"
 #include "traps.h"
 #include "travel.h"
 #include "version.h"
+#include "rltiles/tiledef-dngn.h"
 #ifdef USE_TILE_WEB
 #include "tileweb.h"
 #endif
@@ -80,19 +88,46 @@ static const char * const HOUSING_META_CHUNK = "housing_meta";
 static const char * const HOUSING_LEVEL_CHUNK = "level";
 static const char * const HOUSING_INDEX_CHUNK = "housing_index";
 static const char * const HOUSING_MAP_CHUNK_PREFIX = "housing_map_";
+static const char * const HOUSING_THEME_CHUNK_PREFIX = "housing_theme_";
 static const char * const HOUSING_TEMPLATE_CHUNK = "housing_template";
 static const char * const HOUSING_PORTAL_TARGET_KEY = "housing_target";
 static const char * const HOUSING_SPAWN_MARKER_KEY = "housing_spawn";
+static const char * const HOUSING_VISITOR_WALL_KEY = "housing_visitor_wall";
 static const char * const HOUSING_MONSTER_KEY = "housing_created_monster";
 static const int HOUSING_SNAPSHOT_LEGACY_SCHEMA = 1;
-// Schema 2 permits the strictly validated spawn fixtures, Housing monsters,
-// and shops introduced by this build. Old cores reject it instead of loading
-// actors without the corresponding MID and payload validation.
-static const int HOUSING_SNAPSHOT_SCHEMA = 2;
+// Schema 2 permits strictly validated spawn fixtures, Housing monsters and
+// shops. Schema 3 adds visitor-only wall markers; older cores must reject
+// these snapshots rather than loading their owner-containment walls intact.
+static const int HOUSING_SNAPSHOT_WORLD_SCHEMA = 2;
+static const int HOUSING_SNAPSHOT_SCHEMA = 3;
 static const int HOUSING_MAX_MONSTERS = 64;
 static const int HOUSING_MAX_SHOPS = 32;
 static const int HOUSING_INDEX_SCHEMA = 1;
+static const int HOUSING_THEME_SCHEMA = 1;
 static const int HOUSING_MAX_MAPS = 64;
+
+struct housing_theme_def
+{
+    const char *name;
+    colour_t floor_colour;
+    colour_t rock_colour;
+    const char *floor_tile;
+    const char *rock_tile;
+};
+
+static const housing_theme_def HOUSING_THEMES[] =
+{
+    { "Dungeon", LIGHTGREY, BROWN, "floor_normal", "wall_normal" },
+    { "Lair of Beasts", GREEN, BROWN, "floor_lair", "wall_lair" },
+    { "Orcish Mines", BROWN, BROWN, "floor_orc", "wall_orc" },
+    { "Swamp", BROWN, GREEN, "floor_swamp", "wall_swamp" },
+    { "Vaults", LIGHTGREY, WHITE, "floor_vault", "wall_vault" },
+    { "Crypt", DARKGREY, LIGHTGREY, "floor_tomb", "wall_crypt" },
+    { "Depths", LIGHTGREY, YELLOW,
+      "floor_depthstone", "wall_depths_crystal" },
+    { "Realm of Zot", MAGENTA, LIGHTMAGENTA,
+      "floor_zot_diamonds", "wall_zot_magenta" },
+};
 static int _housing_turn_origin = -1;
 static bool _housing_runtime_initialized = false;
 static bool _housing_started_as_visitor = false;
@@ -123,6 +158,12 @@ static string _housing_current_map_id;
 static string _housing_current_map_owner;
 static string _housing_pending_notice;
 static bool _housing_entry_requires_spawn = false;
+static bool _housing_map_entry_finished = false;
+// A failed in-process replacement restores the package that was checkpointed
+// immediately before the attempt. Its TAG_YOU and D are already paired, so
+// cleanup, respawning and resetting the displayed map clock would all make a
+// supposedly rolled-back session observably different.
+static bool _housing_exact_map_rollback = false;
 
 static const char * const _visitor_start_failure =
     "The Housing visit could not be started safely.";
@@ -132,7 +173,11 @@ static const char * const _owner_return_failure =
 static string _lowercase_ascii(string value);
 static string _getenv_string(const char *name);
 static bool _ensure_owner_map_storage();
-static void _promote_staged_owner_map();
+static void _promote_staged_owner_map(bool exact_rollback = false,
+                                      int rollback_turn_origin = -1);
+static void _open_visitor_only_walls();
+static bool _move_to_spawn(const vector<coord_def> &spawns,
+                           bool secure_choice);
 
 static void _initialize_housing_runtime()
 {
@@ -213,6 +258,69 @@ string housing_map_chunk_name(const string &map_id)
     return _is_map_id(map_id) ? HOUSING_MAP_CHUNK_PREFIX + map_id : "";
 }
 
+static string _housing_map_theme_chunk_name(const string &map_id)
+{
+    return _is_map_id(map_id) ? HOUSING_THEME_CHUNK_PREFIX + map_id : "";
+}
+
+static bool _valid_housing_theme(int theme)
+{
+    return theme >= 0 && theme < static_cast<int>(ARRAYSZ(HOUSING_THEMES));
+}
+
+static void _write_housing_map_theme(package &save, const string &map_id,
+                                     int theme)
+{
+    const string chunk = _housing_map_theme_chunk_name(map_id);
+    if (chunk.empty() || !_valid_housing_theme(theme))
+        fail("invalid Housing map theme");
+    writer output(&save, chunk);
+    marshallInt(output, HOUSING_THEME_SCHEMA);
+    marshallInt(output, theme);
+}
+
+// Return -1 for maps created before per-map branch themes existed. A present
+// chunk is authoritative and fails closed if malformed.
+static int _read_housing_map_theme(package &save, const string &map_id)
+{
+    const string chunk = _housing_map_theme_chunk_name(map_id);
+    if (chunk.empty() || !save.has_chunk(chunk))
+        return -1;
+
+    reader input(&save, chunk);
+    input.set_safe_read(true);
+    const int schema = unmarshallInt(input);
+    const int theme = unmarshallInt(input);
+    if (schema != HOUSING_THEME_SCHEMA || !_valid_housing_theme(theme))
+        corrupted("Housing map has an invalid branch theme");
+    return theme;
+}
+
+static void _apply_housing_map_theme(int theme)
+{
+    if (!_valid_housing_theme(theme))
+        fail("invalid Housing map theme");
+    const housing_theme_def &definition = HOUSING_THEMES[theme];
+    tileidx_t floor;
+    tileidx_t rock;
+    if (!tile_dngn_index(definition.floor_tile, &floor)
+        || !tile_dngn_index(definition.rock_tile, &rock))
+    {
+        fail("Housing branch theme uses an unknown tile");
+    }
+
+    env.floor_colour = definition.floor_colour;
+    env.rock_colour = definition.rock_colour;
+    tile_env.default_flavour.floor = floor;
+    tile_env.default_flavour.floor_idx =
+        store_tilename_get_index(definition.floor_tile);
+    tile_env.default_flavour.wall = rock;
+    tile_env.default_flavour.wall_idx =
+        store_tilename_get_index(definition.rock_tile);
+    tile_clear_flavour();
+    tile_init_flavour();
+}
+
 static void _copy_package_chunk(package &save, const string &source,
                                 const string &destination)
 {
@@ -251,6 +359,18 @@ static bool _package_chunks_equal(package &save, const string &left,
         input.read_all(right_data);
     }
     return left_data == right_data;
+}
+
+bool housing_legacy_template_is_exact_clone(package &save,
+                                            const string &map_id)
+{
+    const string named_map = housing_map_chunk_name(map_id);
+    return !named_map.empty()
+        && save.has_chunk(_housing_save_level_chunk())
+        && save.has_chunk(named_map)
+        && save.has_chunk(HOUSING_TEMPLATE_CHUNK)
+        && _package_chunks_equal(save, _housing_save_level_chunk(), named_map)
+        && _package_chunks_equal(save, named_map, HOUSING_TEMPLATE_CHUNK);
 }
 
 static void _validate_map_index(package &save, const vector<string> &maps,
@@ -320,10 +440,12 @@ void housing_write_map_index(package &save, const vector<string> &maps,
 static bool _is_private_housing_save_chunk(const string &chunk)
 {
     const string map_prefix = HOUSING_MAP_CHUNK_PREFIX;
+    const string theme_prefix = HOUSING_THEME_CHUNK_PREFIX;
     return chunk == _housing_save_level_chunk()
         || chunk == HOUSING_INDEX_CHUNK
         || chunk == HOUSING_TEMPLATE_CHUNK
-        || chunk.compare(0, map_prefix.size(), map_prefix) == 0;
+        || chunk.compare(0, map_prefix.size(), map_prefix) == 0
+        || chunk.compare(0, theme_prefix.size(), theme_prefix) == 0;
 }
 
 void housing_copy_visitor_state(package &source, package &destination)
@@ -438,7 +560,18 @@ static housing_snapshot_meta _read_snapshot_meta(package &snapshot)
 static bool _supported_snapshot_schema(int schema)
 {
     return schema == HOUSING_SNAPSHOT_LEGACY_SCHEMA
+           || schema == HOUSING_SNAPSHOT_WORLD_SCHEMA
            || schema == HOUSING_SNAPSHOT_SCHEMA;
+}
+
+int housing_snapshot_schema_version()
+{
+    return HOUSING_SNAPSHOT_SCHEMA;
+}
+
+bool housing_snapshot_schema_supported(int schema)
+{
+    return _supported_snapshot_schema(schema);
 }
 
 static void _write_snapshot_meta(package &snapshot, const string &account_id,
@@ -488,6 +621,18 @@ const string &housing_current_map_id()
 {
     _initialize_housing_runtime();
     return _housing_current_map_id;
+}
+
+string housing_place()
+{
+    if (!crawl_state.game_is_housing())
+        return "";
+    _initialize_housing_runtime();
+    const string &owner = housing_is_owner() ? you.your_name
+                                              : _housing_current_map_owner;
+    if (owner.empty() || !_is_map_id(_housing_current_map_id))
+        return "";
+    return owner + ":" + _housing_current_map_id;
 }
 
 static bool _ensure_owner_map_storage()
@@ -704,20 +849,40 @@ static void _scrub_housing_map_transition_state()
     you.entering_level = false;
 }
 
-void housing_scrub_visitor_transition_state()
+static bool _housing_transition_changes_map()
 {
-    // A visitor returning through a staged owner-map package has already
-    // switched roles before TAG_YOU restore, but its map-bound references are
-    // still from the canonical map that preceded the requested target.
-    if (housing_is_visitor()
-        || (_housing_owner_promotion_save && _housing_owner_map_changed))
-        _scrub_housing_map_transition_state();
+    return !_housing_exact_map_rollback
+        && (housing_is_visitor()
+            || (_housing_owner_promotion_save && _housing_owner_map_changed));
+}
+
+void housing_prepare_map_transition_restore(bool known_map_change)
+{
+    if (!known_map_change && !_housing_transition_changes_map())
+        return;
+
+    // This is the restore-safe equivalent of the ordinary stairs departure
+    // boundary. It runs after TAG_YOU is available but before target
+    // TAG_LEVEL, so every helper still sees the outgoing/empty actor table and
+    // no delayed reset can bind to an imported target MID.
+    stop_delay(true, true);
+    heal_flayed_effect(&you, true, true);
+    clear_level_bound_player_state(true);
+    _scrub_housing_map_transition_state();
+    drop_pending_monster_resets();
+    crawl_state.potential_pursuers.clear();
+    you.position.reset();
 }
 
 void housing_prepare_loaded_level()
 {
     if (!crawl_state.game_is_housing() || !housing_is_visitor())
         return;
+
+    // Owner containment walls are data-only fixtures. Remove them before
+    // marker activation, travel initialisation and the first redraw so a
+    // visitor never observes or collides with the owner-only barrier.
+    _open_visitor_only_walls();
 
     // Public monsters retain the publisher's MID namespace. Do this at the
     // common TAG_LEVEL boundary, including the first URL visitor restore, so
@@ -814,7 +979,55 @@ static bool _spawn_marker_at(const coord_def &pos)
     return markers.size() == 1
         && markers.front()->get_type() == MAT_WIZ_PROPS
         && markers.front()->property(HOUSING_SPAWN_MARKER_KEY) == "yes"
+        && markers.front()->property(HOUSING_PORTAL_TARGET_KEY).empty()
+        && markers.front()->property(HOUSING_VISITOR_WALL_KEY).empty()
         && markers.front()->property("veto_destroy") == "veto";
+}
+
+static bool _visitor_wall_marker_at(const coord_def &pos)
+{
+    if (!map_bounds(pos) || env.grid(pos) != DNGN_METAL_WALL)
+        return false;
+    const vector<map_marker*> markers = env.markers.get_markers_at(pos);
+    return markers.size() == 1
+        && markers.front()->get_type() == MAT_WIZ_PROPS
+        && markers.front()->property(HOUSING_VISITOR_WALL_KEY) == "yes"
+        && markers.front()->property(HOUSING_SPAWN_MARKER_KEY).empty()
+        && markers.front()->property(HOUSING_PORTAL_TARGET_KEY).empty()
+        && markers.front()->property("veto_destroy") == "veto";
+}
+
+bool housing_visitor_wall_is_valid(const coord_def &pos)
+{
+    return _visitor_wall_marker_at(pos);
+}
+
+void housing_open_visitor_wall(const coord_def &pos)
+{
+    if (!_visitor_wall_marker_at(pos))
+        fail("Housing visitor wall marker is malformed");
+    map_marker *marker = env.markers.get_markers_at(pos).front();
+    env.markers.remove(marker);
+    dungeon_terrain_changed(pos, DNGN_FLOOR, false, false, true);
+}
+
+static void _open_visitor_only_walls()
+{
+    if (!housing_is_visitor())
+        return;
+
+    // Work from a copy because map_markers::remove deletes each marker.
+    const vector<map_marker*> markers = env.markers.get_all();
+    for (map_marker *marker : markers)
+    {
+        if (marker->get_type() != MAT_WIZ_PROPS
+            || marker->property(HOUSING_VISITOR_WALL_KEY) != "yes")
+        {
+            continue;
+        }
+        const coord_def pos = marker->pos;
+        housing_open_visitor_wall(pos);
+    }
 }
 
 static bool _ensure_spawn_fixture(const coord_def &pos)
@@ -875,39 +1088,145 @@ static void _store_spawns(const vector<coord_def> &spawns)
         stored.push_back(spawn);
 }
 
-void housing_ensure_level()
+static bool _stored_spawns_match(const vector<coord_def> &spawns)
 {
+    if (!env.properties.exists(HOUSING_SPAWNS_KEY))
+        return false;
+    const CrawlStoreValue &stored = env.properties[HOUSING_SPAWNS_KEY];
+    if (stored.get_type() != SV_VEC)
+        return false;
+    const CrawlVector &values = stored.get_vector();
+    if (values.get_type() != SV_COORD || values.size() != spawns.size())
+        return false;
+    for (size_t i = 0; i < spawns.size(); ++i)
+        if (values[i].get_coord() != spawns[i])
+            return false;
+    return true;
+}
+
+// Return true only for the narrowly recognised pre-fixture starter template:
+// no persisted spawn list and exactly one marker-free runelight. Callers that
+// stage old multi-map saves use this signal together with byte-identical
+// D/named/template chunks to perform a one-time lossless migration.
+static bool _ensure_housing_level(bool place_new_owner,
+                                  bool *level_mutated = nullptr)
+{
+    if (level_mutated)
+        *level_mutated = false;
     if (housing_current_role() == housing_role_type::none
-        || !you.on_current_level || !in_bounds(you.pos()))
+        || !you.on_current_level)
     {
-        return;
+        return false;
     }
 
+    const bool player_position_valid = in_bounds(you.pos());
+    const bool had_stored_spawn_data =
+        env.properties.exists(HOUSING_SPAWNS_KEY);
     vector<coord_def> spawns = _stored_spawns();
+    bool adopted_template_spawn = false;
+    if (had_stored_spawn_data && spawns.empty())
+        corrupted("Housing map has no valid stored spawn");
     if (spawns.empty())
     {
         if (!housing_is_owner())
-            return;
-        spawns.push_back(you.pos());
+            return false;
+
+        // Encompass vault placement chooses an ordinary player square after
+        // applying KFEAT, so the starter template's visible runelight is not
+        // necessarily under the new character. Adopt that reserved fixture
+        // instead of creating a second runelight at the random player square.
+        vector<coord_def> authenticated;
+        vector<coord_def> bare;
+        bool malformed_runelight = false;
+        for (rectangle_iterator pos(0); pos; ++pos)
+        {
+            if (!map_bounds(*pos) || env.grid(*pos) != DNGN_RUNELIGHT)
+                continue;
+            const vector<map_marker*> markers =
+                env.markers.get_markers_at(*pos);
+            if (_spawn_marker_at(*pos))
+                authenticated.push_back(*pos);
+            else if (markers.empty())
+                bare.push_back(*pos);
+            else
+                malformed_runelight = true;
+        }
+
+        if (malformed_runelight)
+            corrupted("Housing map has a malformed spawn fixture");
+        else if (bare.size() == 1 && authenticated.empty())
+        {
+            spawns = bare;
+            adopted_template_spawn = true;
+        }
+        else if (bare.empty() && !authenticated.empty())
+            spawns = authenticated;
+        else if (bare.empty() && player_position_valid)
+            spawns.push_back(you.pos());
+        else if (!bare.empty())
+            corrupted("Housing map has ambiguous spawn fixtures");
     }
 
-    spawns.erase(std::remove_if(spawns.begin(), spawns.end(),
-                               [](const coord_def &pos) {
-                                   return !_ensure_spawn_fixture(pos);
-                               }),
-                 spawns.end());
     if (spawns.empty())
+        return false;
+
+    // Upgrade stored legacy floor spawns before classifying any remaining
+    // runelights. This remains safe with a reset player position during
+    // in-process and startup replacement loads because it depends only on
+    // persisted level coordinates.
+    for (const coord_def &pos : spawns)
     {
-        if (housing_is_visitor())
-            return;
-        if (_ensure_spawn_fixture(you.pos()))
-            spawns.push_back(you.pos());
+        const bool was_authenticated = _spawn_marker_at(pos);
+        if (!_ensure_spawn_fixture(pos))
+            corrupted("Housing map has a malformed stored spawn");
+        if (level_mutated && !was_authenticated)
+            *level_mutated = true;
     }
+
+    vector<coord_def> legacy_runelights;
+    for (rectangle_iterator pos(0); pos; ++pos)
+    {
+        if (!map_bounds(*pos) || env.grid(*pos) != DNGN_RUNELIGHT
+            || std::find(spawns.begin(), spawns.end(), *pos) != spawns.end())
+        {
+            continue;
+        }
+
+        // Generic Housing terrain editing has never permitted runelight, so
+        // a marker-free one outside the persisted spawn set is unambiguously
+        // starter residue. Canonical owners persist the repair; visitors make
+        // the same repair only in their disposable level capsule so deployed
+        // legacy snapshots remain visitable. Any marker-bearing mismatch
+        // continues to fail closed in both roles.
+        if (!env.markers.get_markers_at(*pos).empty())
+            corrupted("Housing map has an unauthenticated runelight");
+        legacy_runelights.push_back(*pos);
+    }
+    for (const coord_def &pos : legacy_runelights)
+        dungeon_terrain_changed(pos, DNGN_FLOOR, false, false, true);
+    if (level_mutated && !legacy_runelights.empty())
+        *level_mutated = true;
 
     // Visitor maps are disposable, so recording a legacy fixture migration in
     // their temporary level cannot affect the public/canonical snapshot.
+    if (level_mutated && !_stored_spawns_match(spawns))
+        *level_mutated = true;
     _store_spawns(spawns);
 
+    // Only chargen opts into relocation. Ordinary legacy-owner restores also
+    // adopt a unique bare fixture, but preserve their exact saved position.
+    if (place_new_owner && adopted_template_spawn
+        && !_move_to_spawn(spawns, false))
+    {
+        fail("The initial Housing spawn is blocked");
+    }
+
+    return adopted_template_spawn;
+}
+
+void housing_ensure_level(bool place_new_owner)
+{
+    (void) _ensure_housing_level(place_new_owner);
 }
 
 void housing_reset_map_turns()
@@ -963,12 +1282,72 @@ static bool _move_to_spawn(const vector<coord_def> &spawns,
     return true;
 }
 
-void housing_finish_map_entry()
+void housing_finish_map_entry(bool new_game_entry)
 {
-    if (housing_current_role() == housing_role_type::none)
+    if (housing_current_role() == housing_role_type::none
+        || _housing_map_entry_finished)
         return;
 
-    housing_ensure_level();
+    // 37db-era packages could contain a hidden template and a newly-created
+    // named map copied byte-for-byte before the starter's bare runelight was
+    // authenticated. Accept only that exact, unedited triple as migratable;
+    // arbitrary spawn-less or edited maps must continue to fail closed.
+    const string named_map = housing_map_chunk_name(_housing_current_map_id);
+    const bool exact_template_clone = housing_is_owner() && you.save
+        && housing_legacy_template_is_exact_clone(
+            *you.save, _housing_current_map_id);
+    const bool exact_stale_template_clone = exact_template_clone
+        && !env.properties.exists(HOUSING_SPAWNS_KEY);
+    bool level_mutated = false;
+    const bool adopted_bare_spawn =
+        _ensure_housing_level(new_game_entry, &level_mutated);
+    const bool migrate_stale_template =
+        adopted_bare_spawn && exact_stale_template_clone;
+    if (housing_is_owner() && _housing_owner_template_needs_refresh)
+    {
+        if (!you.save)
+            fail("The staged Housing owner package is unavailable");
+
+        // A legacy single-map package was cloned before its old floor spawn
+        // was upgraded to an authenticated runelight fixture above. Keep the
+        // staged named main chunk byte-identical to the loader-facing D before
+        // the strict index check; promotion will also refresh the pristine
+        // template from these sanitized bytes.
+        save_level(level_id::current());
+        _copy_package_chunk(*you.save, _housing_save_level_chunk(),
+                            housing_map_chunk_name(
+                                _housing_current_map_id));
+    }
+    else if (housing_is_owner() && migrate_stale_template)
+    {
+        // Materialise the authenticated fixture once, then keep the staged
+        // loader alias, named target and hidden pristine template identical.
+        // A staged transition tells promotion to copy that template into the
+        // canonical generation; an ordinary restart already owns canonical.
+        save_level(level_id::current());
+        _copy_package_chunk(*you.save, _housing_save_level_chunk(), named_map);
+        _copy_package_chunk(*you.save, _housing_save_level_chunk(),
+                            HOUSING_TEMPLATE_CHUNK);
+        if (_housing_owner_promotion_save)
+            _housing_owner_template_needs_refresh = true;
+    }
+    else if (housing_is_owner() && level_mutated)
+    {
+        // Persist the sanitized active map before the strict D/named equality
+        // check and before any publication attempt. Refresh the hidden
+        // pristine template only when it was byte-identical to the active map
+        // before migration; an edited owner's distinct template is never
+        // overwritten.
+        save_level(level_id::current());
+        _copy_package_chunk(*you.save, _housing_save_level_chunk(), named_map);
+        if (exact_template_clone)
+        {
+            _copy_package_chunk(*you.save, _housing_save_level_chunk(),
+                                HOUSING_TEMPLATE_CHUNK);
+            if (_housing_owner_promotion_save)
+                _housing_owner_template_needs_refresh = true;
+        }
+    }
     if (housing_is_owner() && !_ensure_owner_map_storage())
         fail("The canonical Housing map index is unavailable");
     if (housing_is_owner()
@@ -978,7 +1357,15 @@ void housing_finish_map_entry()
     {
         corrupted("The active Housing level does not match its map index");
     }
-    const bool place_at_spawn = housing_is_visitor()
+    if (housing_is_owner())
+    {
+        const int theme = _read_housing_map_theme(
+            *you.save, _housing_current_map_id);
+        if (theme >= 0)
+            _apply_housing_map_theme(theme);
+    }
+    const bool exact_rollback = _housing_exact_map_rollback;
+    const bool place_at_spawn = (housing_is_visitor() && !exact_rollback)
                                 || _housing_entry_requires_spawn;
     if (place_at_spawn)
     {
@@ -1001,12 +1388,15 @@ void housing_finish_map_entry()
     }
     _housing_entry_requires_spawn = false;
 
-    housing_reset_map_turns();
+    if (!exact_rollback)
+        housing_reset_map_turns();
     if (!_housing_pending_notice.empty())
     {
         mprf(MSGCH_ERROR, "%s", _housing_pending_notice.c_str());
         _housing_pending_notice.clear();
     }
+    _housing_exact_map_rollback = false;
+    _housing_map_entry_finished = true;
 }
 
 int housing_map_turns()
@@ -1023,6 +1413,65 @@ bool housing_is_spawn(const coord_def &pos)
     housing_ensure_level();
     const vector<coord_def> spawns = _stored_spawns();
     return std::find(spawns.begin(), spawns.end(), pos) != spawns.end();
+}
+
+bool housing_toggle_spawn_point(const coord_def &pos)
+{
+    if (!housing_authorize_action("manage spawn points", 0)
+        || !map_bounds(pos) || !in_bounds(pos))
+    {
+        return false;
+    }
+
+    housing_ensure_level();
+    vector<coord_def> spawns = _stored_spawns();
+    const auto found = std::find(spawns.begin(), spawns.end(), pos);
+    if (found != spawns.end())
+    {
+        if (spawns.size() == 1)
+        {
+            mpr("Every Housing map must keep at least one spawn point.");
+            return false;
+        }
+        if (!_spawn_marker_at(pos) || actor_at(pos)
+            || env.igrid(pos) != NON_ITEM)
+        {
+            mpr("That Housing spawn point cannot be removed safely.");
+            return false;
+        }
+
+        map_marker *marker = env.markers.get_markers_at(pos).front();
+        env.markers.remove(marker);
+        dungeon_terrain_changed(pos, DNGN_FLOOR, false, false, true);
+        spawns.erase(found);
+        _store_spawns(spawns);
+        mpr("The Housing spawn point is removed.");
+        return true;
+    }
+
+    // New spawn fixtures are deliberately stricter than general terrain
+    // editing: they may only replace an empty, marker-free ordinary floor.
+    // This prevents hidden portals, shops, items, actors or special terrain
+    // state from being captured by persistent respawn metadata.
+    if (env.grid(pos) != DNGN_FLOOR || actor_at(pos)
+        || env.igrid(pos) != NON_ITEM
+        || !env.markers.get_markers_at(pos).empty())
+    {
+        mpr("Choose an empty ordinary floor square for the spawn point.");
+        return false;
+    }
+
+    dungeon_terrain_changed(pos, DNGN_RUNELIGHT, false, false, true);
+    if (!_ensure_spawn_fixture(pos))
+    {
+        env.markers.remove_markers_at(pos);
+        dungeon_terrain_changed(pos, DNGN_FLOOR, false, false, true);
+        fail("Housing spawn creation was not atomic");
+    }
+    spawns.push_back(pos);
+    _store_spawns(spawns);
+    mpr("A visible Housing spawn point is created.");
+    return true;
 }
 
 bool housing_can_edit(const coord_def &pos)
@@ -1046,23 +1495,57 @@ bool housing_feature_allowed(dungeon_feature_type feat)
     switch (feat)
     {
     case DNGN_FLOOR:
+    case DNGN_CLOSED_DOOR:
+    case DNGN_RUNED_DOOR:
+    case DNGN_SEALED_DOOR:
+    case DNGN_OPEN_DOOR:
     case DNGN_ROCK_WALL:
     case DNGN_STONE_WALL:
     case DNGN_METAL_WALL:
     case DNGN_CRYSTAL_WALL:
+    case DNGN_SLIMY_WALL:
+    case DNGN_PERMAROCK_WALL:
     case DNGN_CLEAR_ROCK_WALL:
     case DNGN_CLEAR_STONE_WALL:
-    case DNGN_CLOSED_DOOR:
-    case DNGN_OPEN_DOOR:
-#if TAG_MAJOR_VERSION > 34
-    case DNGN_CLOSED_CLEAR_DOOR:
-    case DNGN_OPEN_CLEAR_DOOR:
-#endif
+    case DNGN_CLEAR_PERMAROCK_WALL:
+    case DNGN_GRATE:
+    case DNGN_OPEN_SEA:
+    case DNGN_LAVA_SEA:
+    case DNGN_ORCISH_IDOL:
+    case DNGN_STONE_ARCH:
+    case DNGN_EXPIRED_PORTAL:
     case DNGN_TREE:
     case DNGN_GRANITE_STATUE:
     case DNGN_SHALLOW_WATER:
     case DNGN_DEEP_WATER:
     case DNGN_LAVA:
+    case DNGN_FOUNTAIN_BLUE:
+    case DNGN_FOUNTAIN_SPARKLING:
+    case DNGN_FOUNTAIN_BLOOD:
+    case DNGN_DRY_FOUNTAIN:
+#if TAG_MAJOR_VERSION > 34
+    case DNGN_BROKEN_DOOR:
+    case DNGN_CLOSED_CLEAR_DOOR:
+    case DNGN_BROKEN_CLEAR_DOOR:
+    case DNGN_RUNED_CLEAR_DOOR:
+    case DNGN_SEALED_CLEAR_DOOR:
+    case DNGN_OPEN_CLEAR_DOOR:
+    case DNGN_MANGROVE:
+    case DNGN_DEMONIC_TREE:
+    case DNGN_PETRIFIED_TREE:
+    case DNGN_FRIGID_WALL:
+    case DNGN_ENDLESS_SALT:
+    case DNGN_METAL_STATUE:
+    case DNGN_ZOT_STATUE:
+    case DNGN_MUD:
+    case DNGN_TOXIC_BOG:
+    case DNGN_BINDING_SIGIL:
+    case DNGN_PURIFIED_MUTATION_CATALYST:
+    case DNGN_FOUNTAIN_EYES:
+    case DNGN_CACHE_OF_BAKED_GOODS:
+    case DNGN_CACHE_OF_FRUIT:
+    case DNGN_CACHE_OF_MEAT:
+#endif
         return true;
     default:
         return false;
@@ -1100,6 +1583,8 @@ static bool _portal_target_at(const coord_def &pos, string *target)
         return false;
     const string value = markers.front()->property(HOUSING_PORTAL_TARGET_KEY);
     if (!housing_valid_map_target(value)
+        || !markers.front()->property(HOUSING_SPAWN_MARKER_KEY).empty()
+        || !markers.front()->property(HOUSING_VISITOR_WALL_KEY).empty()
         || markers.front()->property("veto_destroy") != "veto")
     {
         return false;
@@ -1141,16 +1626,57 @@ bool housing_create_portal(const coord_def &pos, const string &target)
     return true;
 }
 
-static bool _housing_monster_type_allowed(monster_type type)
+bool housing_toggle_visitor_wall(const coord_def &pos)
+{
+    if (!housing_authorize_action("toggle an owner-only barrier", 0)
+        || !map_bounds(pos) || !in_bounds(pos))
+    {
+        return false;
+    }
+
+    if (_visitor_wall_marker_at(pos))
+    {
+        if (actor_at(pos) || env.igrid(pos) != NON_ITEM
+            || housing_is_spawn(pos))
+        {
+            mpr("That owner-only barrier cannot be removed safely.");
+            return false;
+        }
+        map_marker *marker = env.markers.get_markers_at(pos).front();
+        env.markers.remove(marker);
+        dungeon_terrain_changed(pos, DNGN_FLOOR, false, false, true);
+        mpr("The owner-only barrier is removed.");
+        return true;
+    }
+
+    if (!housing_can_edit(pos))
+    {
+        mpr("That square is protected in Housing.");
+        return false;
+    }
+
+    dungeon_terrain_changed(pos, DNGN_METAL_WALL, false, false, true);
+    auto *marker = new map_wiz_props_marker(pos);
+    marker->set_property(HOUSING_VISITOR_WALL_KEY, "yes");
+    marker->set_property("feature_description", "owner-only barrier");
+    marker->set_property("veto_destroy", "veto");
+    env.markers.add(marker);
+    if (!_visitor_wall_marker_at(pos))
+        fail("Housing visitor wall creation was not atomic");
+    mpr("An opaque owner-only barrier rises; visitors can pass through it.");
+    return true;
+}
+
+bool housing_monster_type_allowed(monster_type type)
 {
     if (type <= MONS_PROGRAM_BUG || type >= NUM_MONSTERS
-        || mons_is_unique(type) || mons_is_pghost(type)
-        || mons_class_is_test(type) || mons_class_is_peripheral(type)
+        || mons_is_pghost(type)
+        || mons_class_is_test(type) || mons_class_is_zombified(type)
         || mons_is_projectile(type) || mons_is_seeker(type)
         || mons_is_tentacle_head(type)
         || mons_is_tentacle_or_tentacle_segment(type)
         || mons_class_flag(type, M_CANT_SPAWN | M_UNFINISHED | M_UNSTABLE
-                                 | M_NO_GEN_DERIVED | M_ANCESTOR | M_AVATAR))
+                                 | M_PERIPHERAL | M_ANCESTOR | M_AVATAR))
     {
         return false;
     }
@@ -1159,6 +1685,9 @@ static bool _housing_monster_type_allowed(monster_type type)
 
 bool housing_create_monster()
 {
+    if (!housing_authorize_action("create a monster", 0))
+        return false;
+
     const int live_monsters = std::count_if(
         menv_real.begin(), menv_real.end(),
         [](const monster &mons) { return mons.alive(); });
@@ -1169,29 +1698,72 @@ bool housing_create_monster()
     }
 
     char name[128];
-    mprf(MSGCH_PROMPT, "Monster name: ");
+    mprf(MSGCH_PROMPT, "Enter monster name: ");
     if (cancellable_get_line_autohist(name, sizeof name) || !*name)
     {
         canned_msg(MSG_OK);
         return false;
     }
 
-    const monster_type type = get_monster_by_name(name);
-    if (!_housing_monster_type_allowed(type))
+    monster_type type = get_monster_by_name(name);
+    if (type == MONS_PROGRAM_BUG && string(name).size() >= 3)
+        type = get_monster_by_name(name, true);
+    if (!housing_monster_type_allowed(type))
     {
         mpr("That monster cannot be created in Housing.");
         return false;
     }
-
-    coord_def place = find_newmons_square(type, you.pos(), 2,
-                                          you.current_vision);
-    if (!in_bounds(place) || housing_is_spawn(place))
+    if (mons_is_unique(type) && you.unique_creatures[type])
     {
-        mpr("There is no unprotected space for that monster nearby.");
+        mpr("That unique monster has already been created for this character.");
         return false;
     }
 
-    mgen_data mg(type, BEH_HOSTILE, place, MHITYOU, MG_FORBID_BANDS);
+    // Match the wizard flow: settle the requested type first, then enter a
+    // WebTiles-compatible cell targeter. Quivered activation reaches this same
+    // chooser instead of borrowing hostile autofight targeting.
+    targeter_smite hitfunc(&you, LOS_MAX_RANGE, 0, 0,
+                           true, false, false);
+    direction_chooser_args args;
+    args.hitfunc = &hitfunc;
+    args.restricts = DIR_ENFORCE_RANGE;
+    args.mode = TARG_NON_ACTOR;
+    args.range = LOS_MAX_RANGE;
+    args.needs_path = false;
+    args.self = confirm_prompt_type::cancel;
+    args.top_prompt = "Place housing monster: <w>" +
+                      mons_type_name(type, DESC_PLAIN) + "</w>";
+    dist target;
+    direction(target, args);
+    if (!target.isValid || target.isCancel)
+    {
+        canned_msg(MSG_OK);
+        return false;
+    }
+    const coord_def place = target.target;
+
+    // The chooser is advisory. Recheck every mutation invariant here so
+    // scripted/replayed targets cannot overwrite actors, items, authenticated
+    // fixtures, spawns, unseen cells, or map bounds.
+    if (!map_bounds(place) || !in_bounds(place)
+        || (place - you.pos()).rdist() > LOS_MAX_RANGE
+        || !you.see_cell_no_trans(place)
+        || actor_at(place) || env.igrid(place) != NON_ITEM
+        || !env.markers.get_markers_at(place).empty()
+        || housing_is_spawn(place))
+    {
+        mpr("That square cannot hold a Housing monster.");
+        return false;
+    }
+
+    if (!monster_habitable_grid(type, place))
+    {
+        mpr("That monster cannot inhabit the targeted square.");
+        return false;
+    }
+
+    mgen_data mg(type, BEH_HOSTILE, place, MHITYOU,
+                 MG_FORBID_BANDS | MG_FORCE_PLACE);
     mg.extra_flags |= MF_NO_REWARD;
     monster *created = create_monster(mg);
     if (!created)
@@ -1220,24 +1792,201 @@ static bool _split_map_target(const string &target, string &owner,
     return true;
 }
 
-static std::unique_ptr<package> _open_public_snapshot(const string &owner,
-                                                      const string &map_id,
-                                                      housing_snapshot_meta &meta)
+static string _housing_owner_public_dir(const string &public_dir,
+                                        const string &owner)
 {
-    const string public_dir = _getenv_string("CRAWL_HOUSING_PUBLIC_DIR");
-    if (public_dir.empty() || !_is_account_name(owner) || !_is_map_id(map_id))
-        return nullptr;
+    return catpath(catpath(public_dir, "by-name"),
+                   _lowercase_ascii(owner));
+}
 
-    const string snapshot_path =
-        catpath(catpath(catpath(public_dir, "by-name"),
-                        _lowercase_ascii(owner)), map_id + ".hmap");
-    if (!_path_is_within(snapshot_path, public_dir))
-        return nullptr;
+static string _housing_owner_binding_path(const string &public_dir,
+                                          const string &owner)
+{
+    return catpath(_housing_owner_public_dir(public_dir, owner),
+                   ".account-id");
+}
 
-    std::unique_ptr<package> snapshot(new package(snapshot_path.c_str(), false));
+// Return false only when no binding exists. A present but malformed,
+// inaccessible or non-regular binding is a hard error, never an invitation to
+// fall back to a potentially different legacy owner payload.
+static bool _read_public_owner_binding(const string &public_dir,
+                                       const string &owner,
+                                       string &account_id)
+{
+#ifdef TARGET_OS_WINDOWS
+    UNUSED(public_dir, owner, account_id);
+    return false;
+#else
+    const string owner_dir = _housing_owner_public_dir(public_dir, owner);
+    struct stat owner_info;
+    errno = 0;
+    if (lstat(owner_dir.c_str(), &owner_info) != 0)
+    {
+        if (errno == ENOENT)
+            return false;
+        sysfail("could not inspect Housing owner binding directory");
+    }
+    if (!S_ISDIR(owner_info.st_mode)
+        || !_path_is_within(owner_dir, public_dir))
+    {
+        fail("Housing owner binding directory is unsafe");
+    }
+
+    const string binding = _housing_owner_binding_path(public_dir, owner);
+    struct stat binding_info;
+    errno = 0;
+    if (lstat(binding.c_str(), &binding_info) != 0)
+    {
+        if (errno == ENOENT)
+            return false;
+        sysfail("could not inspect Housing owner binding");
+    }
+    if (!S_ISREG(binding_info.st_mode) || binding_info.st_size < 1
+        || binding_info.st_size > 20 || !_path_is_within(binding, public_dir))
+    {
+        fail("Housing owner binding is malformed");
+    }
+
+    FILE *raw = fopen_u(binding.c_str(), "rb");
+    if (!raw)
+        sysfail("could not open Housing owner binding");
+    std::unique_ptr<FILE, int (*)(FILE*)> file(raw, fclose);
+    const int fd = fileno(raw);
+    if (fd < 0 || !lock_file(fd, false, true))
+        fail("could not lock Housing owner binding");
+
+    char value[21] = {};
+    const size_t count = fread(value, 1, sizeof(value), raw);
+    const bool read_failed = ferror(raw);
+    unlock_file(fd);
+    if (read_failed || count != static_cast<size_t>(binding_info.st_size)
+        || count == sizeof(value))
+    {
+        fail("could not read Housing owner binding safely");
+    }
+    account_id.assign(value, count);
+    if (!_is_decimal_id(account_id))
+        fail("Housing owner binding has an invalid account id");
+    return true;
+#endif
+}
+
+static bool _bind_public_owner(const string &public_dir,
+                               const string &owner,
+                               const string &account_id)
+{
+    string existing;
+    if (_read_public_owner_binding(public_dir, owner, existing))
+        return existing == account_id;
+
+#ifdef TARGET_OS_WINDOWS
+    return false;
+#else
+    const string binding = _housing_owner_binding_path(public_dir, owner);
+    string temporary_template = binding + ".tmp.XXXXXX";
+    vector<char> temporary_buf(temporary_template.begin(),
+                               temporary_template.end());
+    temporary_buf.push_back('\0');
+    const int fd = mkstemp(temporary_buf.data());
+    if (fd < 0)
+        return false;
+    const string temporary = temporary_buf.data();
+
+    FILE *raw = fdopen(fd, "wb");
+    if (!raw)
+    {
+        close(fd);
+        unlink_u(temporary.c_str());
+        return false;
+    }
+    bool success = false;
+    if (lock_file(fd, true, true))
+    {
+        success = fwrite(account_id.data(), 1, account_id.size(), raw)
+                      == account_id.size()
+                  && fflush(raw) == 0 && fdatasync(fd) == 0;
+        unlock_file(fd);
+    }
+    if (fclose(raw) != 0)
+        success = false;
+    if (!success)
+    {
+        unlink_u(temporary.c_str());
+        return false;
+    }
+
+    // A hard link is the portable Unix no-replace install primitive here: the
+    // final name appears only after the complete temp file is durable, and a
+    // racing publisher can never overwrite an existing account binding.
+    errno = 0;
+    const bool installed = link(temporary.c_str(), binding.c_str()) == 0;
+    const int install_error = errno;
+    unlink_u(temporary.c_str());
+    if (installed)
+    {
+#ifdef O_DIRECTORY
+        const string owner_dir = _housing_owner_public_dir(public_dir, owner);
+        const int parent_fd = open(owner_dir.c_str(), O_RDONLY | O_DIRECTORY);
+        if (parent_fd >= 0)
+        {
+            fsync(parent_fd);
+            close(parent_fd);
+        }
+#endif
+        return true;
+    }
+    if (install_error != EEXIST)
+        return false;
+    return _read_public_owner_binding(public_dir, owner, existing)
+        && existing == account_id;
+#endif
+}
+
+bool housing_bind_public_owner(const string &public_dir,
+                               const string &owner_name,
+                               const string &account_id)
+{
+    if (public_dir.empty() || !_is_account_name(owner_name)
+        || !_is_decimal_id(account_id))
+    {
+        return false;
+    }
+    try
+    {
+        return _bind_public_owner(public_dir, owner_name, account_id);
+    }
+    catch (const std::exception &error)
+    {
+        dprf("Housing owner binding failed: %s", error.what());
+        return false;
+    }
+}
+
+static std::unique_ptr<package> _open_valid_public_snapshot(
+    const string &path, const string &public_dir, const string &owner,
+    const string &map_id, const string &expected_account,
+    housing_snapshot_meta &meta)
+{
+#ifndef TARGET_OS_WINDOWS
+    struct stat info;
+    errno = 0;
+    if (lstat(path.c_str(), &info) != 0)
+    {
+        if (errno == ENOENT)
+            return nullptr;
+        sysfail("could not inspect Housing public snapshot");
+    }
+    if (!S_ISREG(info.st_mode))
+        fail("Housing public snapshot is not a regular file");
+#endif
+    if (!_path_is_within(path, public_dir))
+        fail("Housing public snapshot escaped its directory");
+
+    std::unique_ptr<package> snapshot(new package(path.c_str(), false));
     meta = _read_snapshot_meta(*snapshot);
     if (!_supported_snapshot_schema(meta.schema)
         || !_is_decimal_id(meta.account_id)
+        || (!expected_account.empty() && meta.account_id != expected_account)
         || meta.map_id != map_id
         || _lowercase_ascii(meta.owner_name) != _lowercase_ascii(owner)
         // TAG_LEVEL's tagged header is the authoritative compatibility gate.
@@ -1248,6 +1997,80 @@ static std::unique_ptr<package> _open_public_snapshot(const string &owner,
         fail("Housing snapshot metadata does not match the portal");
     }
     return snapshot;
+}
+
+static std::unique_ptr<package> _resolve_public_snapshot(
+    const string &public_dir, const string &owner, const string &map_id,
+    string &snapshot_path, housing_snapshot_meta &meta)
+{
+    string account_id;
+    const bool has_binding =
+        _read_public_owner_binding(public_dir, owner, account_id);
+    const string legacy_path =
+        catpath(_housing_owner_public_dir(public_dir, owner),
+                map_id + ".hmap");
+
+    if (has_binding)
+    {
+        const string numeric_path =
+            catpath(catpath(public_dir, account_id), map_id + ".hmap");
+        std::unique_ptr<package> numeric = _open_valid_public_snapshot(
+            numeric_path, public_dir, owner, map_id, account_id, meta);
+        if (numeric)
+        {
+            snapshot_path = numeric_path;
+            return numeric;
+        }
+        return nullptr;
+    }
+
+    // Unbound names are old-layout only. Read their metadata to discover the
+    // immutable account id, then read the matching numeric payload. Visitor
+    // resolution never mutates the public index; authenticated owner publish
+    // installs the stable binding later.
+    std::unique_ptr<package> legacy = _open_valid_public_snapshot(
+        legacy_path, public_dir, owner, map_id, "", meta);
+    if (!legacy)
+        return nullptr;
+    const string numeric_path =
+        catpath(catpath(public_dir, meta.account_id), map_id + ".hmap");
+    housing_snapshot_meta numeric_meta;
+    std::unique_ptr<package> numeric = _open_valid_public_snapshot(
+        numeric_path, public_dir, owner, map_id, meta.account_id,
+        numeric_meta);
+    if (!numeric)
+        return nullptr;
+    meta = numeric_meta;
+    snapshot_path = numeric_path;
+    return numeric;
+}
+
+bool housing_resolve_public_snapshot_path(const string &public_dir,
+                                          const string &owner_name,
+                                          const string &map_id,
+                                          string &snapshot_path)
+{
+    if (public_dir.empty() || !_is_account_name(owner_name)
+        || !_is_map_id(map_id))
+    {
+        return false;
+    }
+    housing_snapshot_meta meta;
+    return static_cast<bool>(_resolve_public_snapshot(
+        public_dir, owner_name, map_id, snapshot_path, meta));
+}
+
+static std::unique_ptr<package> _open_public_snapshot(const string &owner,
+                                                      const string &map_id,
+                                                      housing_snapshot_meta &meta)
+{
+    const string public_dir = _getenv_string("CRAWL_HOUSING_PUBLIC_DIR");
+    if (public_dir.empty() || !_is_account_name(owner) || !_is_map_id(map_id))
+        return nullptr;
+
+    string snapshot_path;
+    return _resolve_public_snapshot(public_dir, owner, map_id, snapshot_path,
+                                    meta);
 }
 
 static std::unique_ptr<package> _clone_with_snapshot_level(
@@ -1458,7 +2281,8 @@ static std::unique_ptr<package> _stage_owner_map(package &canonical,
 }
 
 static NORETURN void _restart_canonical_after_owner_transition_failure(
-    package *staged, package *canonical, const string &notice)
+    package *staged, package *canonical, const string &notice,
+    bool exact_rollback = false, int rollback_turn_origin = -1)
 {
     if (!staged)
         staged = _housing_staged_owner_save;
@@ -1499,12 +2323,17 @@ static NORETURN void _restart_canonical_after_owner_transition_failure(
     _housing_visitor_save = nullptr;
     _housing_skip_next_checkpoint = true;
     _housing_entry_requires_spawn = false;
+    _housing_map_entry_finished = false;
+    _housing_exact_map_rollback = exact_rollback;
+    if (exact_rollback)
+        _housing_turn_origin = rollback_turn_origin;
     _housing_pending_notice = notice;
     macro_clear_mappings();
     game_ended(game_exit::housing_transition);
 }
 
-static void _promote_staged_owner_map()
+static void _promote_staged_owner_map(bool exact_rollback,
+                                      int rollback_turn_origin)
 {
     ASSERT(housing_is_owner());
     ASSERT(_housing_owner_promotion_save);
@@ -1550,7 +2379,8 @@ static void _promote_staged_owner_map()
         _restart_canonical_after_owner_transition_failure(
             staged, canonical,
             "That Housing map could not be saved safely; the last committed "
-            "owner map was restored.");
+            "owner map was restored.", exact_rollback,
+            rollback_turn_origin);
     }
 
     staged->abort();
@@ -1587,6 +2417,7 @@ void housing_complete_staged_owner_restore()
     if (_housing_entry_requires_spawn)
         fail("The staged Housing owner map was not finalised during load");
     _promote_staged_owner_map();
+    update_whereis();
 }
 
 void housing_rollback_staged_owner_restore()
@@ -1627,6 +2458,8 @@ static NORETURN void _return_to_owner(std::unique_ptr<package> staged,
     _housing_owner_template_needs_refresh = template_needs_refresh;
     _housing_skip_next_checkpoint = false;
     _housing_entry_requires_spawn = _housing_owner_map_changed;
+    _housing_map_entry_finished = false;
+    _housing_exact_map_rollback = false;
     macro_clear_mappings();
     game_ended(game_exit::housing_transition);
 }
@@ -1709,6 +2542,7 @@ static bool _enter_owner_map(const string &target_map)
 
     package *canonical = you.save;
     package *staged_save = nullptr;
+    const int rollback_turn_origin = _housing_turn_origin;
     try
     {
         _checkpoint_owner_before_visit();
@@ -1730,20 +2564,16 @@ static bool _enter_owner_map(const string &target_map)
         _housing_owner_template_needs_refresh = template_needs_refresh;
         _housing_current_map_id = target_map;
         _housing_entry_requires_spawn = true;
+        _housing_map_entry_finished = false;
+        _housing_exact_map_rollback = false;
 
-        stop_delay(true, true);
-        heal_flayed_effect(&you, true, true);
-        clear_level_bound_player_state(true);
-        _scrub_housing_map_transition_state();
-        drop_pending_monster_resets();
-        crawl_state.potential_pursuers.clear();
+        housing_prepare_map_transition_restore(true);
         const level_id old_level = level_id::current();
-        you.position.reset();
         load_level(DNGN_UNSEEN, LOAD_HOUSING_REPLACE, old_level);
 
         // LOAD_HOUSING_REPLACE has now completed every marker, travel and tile
         // hook. Promote the staged map only after that full boundary succeeds.
-        _promote_staged_owner_map();
+        _promote_staged_owner_map(true, rollback_turn_origin);
     }
     catch (const game_ended_condition&)
     {
@@ -1758,21 +2588,29 @@ static bool _enter_owner_map(const string &target_map)
         _restart_canonical_after_owner_transition_failure(
             staged_save, canonical,
             "That Housing map could not be loaded safely; the previous owner "
-            "map was restored.");
+            "map was restored.", true, rollback_turn_origin);
     }
 
     crawl_state.need_save = true;
     you.turn_is_over = false;
-    housing_publish_current_map();
+    const bool published = housing_publish_current_map();
+    update_whereis();
     mprf("You enter %s:%s.", you.your_name.c_str(), target_map.c_str());
+    if (!published)
+    {
+        mprf(MSGCH_ERROR,
+             "You entered the map, but its public Housing snapshot was not "
+             "published. Saving or completing another Housing action will "
+             "retry it.");
+    }
     return true;
 }
 
-static bool _create_owner_map(const string &map_id)
+static bool _create_owner_map(const string &map_id, int theme)
 {
-    if (!_is_map_id(map_id))
+    if (!_is_map_id(map_id) || !_valid_housing_theme(theme))
     {
-        mpr("Map ids use 1-20 ASCII letters, digits, or underscores.");
+        mpr("The Housing map id or branch theme is invalid.");
         return false;
     }
     if (!housing_authorize_action("create a map", 0)
@@ -1800,11 +2638,12 @@ static bool _create_owner_map(const string &map_id)
 
     _copy_package_chunk(*you.save, HOUSING_TEMPLATE_CHUNK,
                         housing_map_chunk_name(map_id));
+    _write_housing_map_theme(*you.save, map_id, theme);
     maps.push_back(map_id);
     housing_write_map_index(*you.save, maps, current_map);
     you.save->commit();
-    mprf("Created Housing map '%s'. Enter it once before other players can "
-         "visit it.", map_id.c_str());
+    mprf("Created Housing map '%s' with the %s theme.", map_id.c_str(),
+         HOUSING_THEMES[theme].name);
     return true;
 }
 
@@ -1815,6 +2654,9 @@ static bool _unlink_public_map_file(const string &path,
     // on a missing or dangling entry cannot distinguish ENOENT from failures
     // such as EACCES/ENOTDIR. Once the parent is proven inside the public tree,
     // unlinking the exact basename is safe even when that entry is a symlink.
+    // The public tree is server-owned and not user-writable; this is static
+    // corruption hardening, not a boundary against a hostile same-uid process
+    // racing directory replacement between these path-based checks.
     const string parent = _path_without_trailing_separators(
         get_parent_directory(path));
     if (parent.empty())
@@ -1829,6 +2671,8 @@ static bool _unlink_public_map_file(const string &path,
         // lookup error is retained as a fail-closed deletion failure.
         return errno == ENOENT;
     }
+    if (!S_ISDIR(parent_info.st_mode))
+        return false;
 #else
     return false;
 #endif
@@ -1845,8 +2689,11 @@ bool housing_unpublish_map_files(const string &public_dir,
                                  const string &owner_name,
                                  const string &map_id)
 {
-    if (public_dir.empty() || !_is_decimal_id(account_id)
-        || !_is_account_name(owner_name) || !_is_map_id(map_id))
+    if (!_is_account_name(owner_name) || !_is_map_id(map_id))
+        return false;
+    if (public_dir.empty())
+        return account_id.empty();
+    if (!_is_decimal_id(account_id))
     {
         return false;
     }
@@ -1870,7 +2717,14 @@ static bool _unpublish_owner_map(const string &map_id)
 {
     const string public_dir = _getenv_string("CRAWL_HOUSING_PUBLIC_DIR");
     if (public_dir.empty())
-        return true;
+    {
+        if (_getenv_string("CRAWL_HOUSING_ACCOUNT_ID").empty())
+            return true;
+        mprf(MSGCH_ERROR,
+             "The Housing public map directory is not configured; the map "
+             "was not deleted.");
+        return false;
+    }
 
     return housing_unpublish_map_files(
         public_dir, _getenv_string("CRAWL_HOUSING_ACCOUNT_ID"),
@@ -1924,6 +2778,9 @@ static bool _delete_owner_map(const string &map_id)
     }
 
     you.save->delete_chunk(housing_map_chunk_name(map_id));
+    const string theme_chunk = _housing_map_theme_chunk_name(map_id);
+    if (you.save->has_chunk(theme_chunk))
+        you.save->delete_chunk(theme_chunk);
     maps.erase(found);
     housing_write_map_index(*you.save, maps, current_map);
     you.save->commit();
@@ -1991,6 +2848,27 @@ static char _select_housing_map_action(const string &map_id,
     return selected.empty() ? 0 : *static_cast<char*>(selected[0]->data);
 }
 
+static int _select_housing_map_theme()
+{
+    Menu menu(MF_SINGLESELECT | MF_ARROWS_SELECT | MF_INIT_HOVER);
+    menu.set_title(new MenuEntry("Choose a Housing branch theme", MEL_TITLE));
+
+    vector<int> themes;
+    themes.reserve(ARRAYSZ(HOUSING_THEMES));
+    menu_letter hotkey('a');
+    for (int i = 0; i < static_cast<int>(ARRAYSZ(HOUSING_THEMES)); ++i)
+    {
+        themes.push_back(i);
+        auto *entry = new MenuEntry(HOUSING_THEMES[i].name, MEL_ITEM, 1,
+                                    static_cast<char>(hotkey++));
+        entry->data = &themes.back();
+        menu.add_entry(entry);
+    }
+
+    const vector<MenuEntry*> selected = menu.show();
+    return selected.empty() ? -1 : *static_cast<int*>(selected[0]->data);
+}
+
 bool housing_manage_maps()
 {
     if (!housing_is_owner())
@@ -2023,7 +2901,20 @@ bool housing_manage_maps()
                 canned_msg(MSG_OK);
                 return false;
             }
-            return _create_owner_map(map_id);
+            if (!housing_valid_map_id(map_id))
+            {
+                mpr("Map ids use 1-20 ASCII letters, digits, or underscores.");
+                return false;
+            }
+            const int theme = _select_housing_map_theme();
+            if (theme < 0)
+                return false;
+            if (!_create_owner_map(map_id, theme))
+                return false;
+            // Creation is an in-process owner-map transition. The current
+            // character and socket stay intact; only the pristine themed
+            // TAG_LEVEL is loaded and then published.
+            return _enter_owner_map(map_id);
         }
 
         const char action = _select_housing_map_action(
@@ -2050,7 +2941,7 @@ bool housing_manage_maps()
         _restart_canonical_after_owner_transition_failure(
             nullptr, canonical,
             "Housing map management failed safely; the last committed owner "
-            "state was restored.");
+            "state was restored.", true, _housing_turn_origin);
     }
 }
 
@@ -2067,6 +2958,7 @@ static void _replace_with_visitor_map(std::unique_ptr<package> replacement,
     const bool previous_was_owner = previous_role == housing_role_type::owner;
     const string previous_map_owner = _housing_current_map_owner;
     const string previous_map_id = _housing_current_map_id;
+    const int rollback_turn_origin = _housing_turn_origin;
     if (previous_was_owner)
         _housing_canonical_save_path = previous->get_filename();
 
@@ -2075,6 +2967,8 @@ static void _replace_with_visitor_map(std::unique_ptr<package> replacement,
     _housing_runtime_role = housing_role_type::visitor;
     _housing_current_map_owner = owner;
     _housing_current_map_id = map_id;
+    _housing_map_entry_finished = false;
+    _housing_exact_map_rollback = false;
 
     // Everything below the checkpoint mutates only the disposable visitor
     // state. The ordinary level loader resets env/menv and all tile caches;
@@ -2082,17 +2976,8 @@ static void _replace_with_visitor_map(std::unique_ptr<package> replacement,
     // map before TAG_LEVEL is restored.
     try
     {
-        stop_delay(true, true);
-        heal_flayed_effect(&you, true, true);
-        clear_level_bound_player_state(true);
-        housing_scrub_visitor_transition_state();
-        // KILL_RESET effects created by the cleanup refer to the outgoing menv;
-        // discard them before TAG_LEVEL replaces that array. Pursuer pointers
-        // have the same lifetime boundary.
-        drop_pending_monster_resets();
-        crawl_state.potential_pursuers.clear();
+        housing_prepare_map_transition_restore(true);
         const level_id old_level = level_id::current();
-        you.position.reset();
         load_level(DNGN_UNSEEN, LOAD_HOUSING_REPLACE, old_level);
     }
     catch (...)
@@ -2110,6 +2995,10 @@ static void _replace_with_visitor_map(std::unique_ptr<package> replacement,
         _housing_owner_save = previous_was_owner ? previous : nullptr;
         _housing_visitor_save = previous_was_owner ? nullptr : previous;
         _housing_skip_next_checkpoint = previous_was_owner;
+        _housing_entry_requires_spawn = false;
+        _housing_map_entry_finished = false;
+        _housing_exact_map_rollback = true;
+        _housing_turn_origin = rollback_turn_origin;
         _housing_pending_notice =
             "That Housing map could not be loaded safely; the previous map "
             "was restored.";
@@ -2133,6 +3022,7 @@ static void _replace_with_visitor_map(std::unique_ptr<package> replacement,
 
     crawl_state.need_save = true;
     you.turn_is_over = false;
+    update_whereis();
     mprf("You enter %s:%s.", owner.c_str(), map_id.c_str());
 }
 
@@ -2232,7 +3122,7 @@ bool housing_take_portal(const coord_def &pos)
 static bool _housing_monster_can_be_published(const monster &mons)
 {
     return mons.alive()
-        && _housing_monster_type_allowed(mons.type)
+        && housing_monster_type_allowed(mons.type)
         && testbits(mons.flags, MF_NO_REWARD)
         && mons.props.exists(HOUSING_MONSTER_KEY)
         && mons.props[HOUSING_MONSTER_KEY].get_type() == SV_BOOL
@@ -2345,7 +3235,8 @@ static bool _current_map_can_be_published()
     for (map_marker *marker : env.markers.get_all())
         if ((marker->get_type() != MAT_WIZ_PROPS
              || (!_portal_target_at(marker->pos, nullptr)
-                 && !_spawn_marker_at(marker->pos))))
+                 && !_spawn_marker_at(marker->pos)
+                 && !_visitor_wall_marker_at(marker->pos))))
         {
             mprf(MSGCH_ERROR,
                  "Housing publish rejected: marker %d at (%d,%d).",
@@ -2416,56 +3307,65 @@ static void _write_public_snapshot(const string &final_path,
     }
 }
 
-void housing_publish_current_map()
+bool housing_publish_current_map()
 {
-    if (!housing_is_owner() || !you.save || !you.on_current_level)
-        return;
+    if (!housing_is_owner())
+        return true;
+    if (!you.save || !you.on_current_level)
+        return false;
 
     const string account_id = _getenv_string("CRAWL_HOUSING_ACCOUNT_ID");
     const string map_id = housing_current_map_id();
     string public_dir = _getenv_string("CRAWL_HOUSING_PUBLIC_DIR");
     if (public_dir.empty())
-        return; // Console development without a WebTiles account binding.
+    {
+        // A completely unbound console session deliberately has nowhere to
+        // publish. Once WebTiles supplies an account id, omitting its public
+        // directory is a deployment failure and must not be reported as a
+        // successful map creation/entry.
+        if (account_id.empty())
+            return true;
+        mprf(MSGCH_ERROR,
+             "The Housing public map directory is not configured.");
+        return false;
+    }
 
     if (!_is_decimal_id(account_id) || !_is_map_id(map_id)
         || !_is_account_name(you.your_name))
     {
         mprf(MSGCH_ERROR,
              "The Housing account/map publication binding is invalid.");
-        return;
+        return false;
     }
     if (!_current_map_can_be_published())
     {
         mprf(MSGCH_ERROR, "This Housing map is not safe to publish.");
-        return;
+        return false;
     }
     const string save_level_chunk = _housing_save_level_chunk();
     if (!you.save->has_chunk(save_level_chunk))
     {
         mprf(MSGCH_ERROR, "The Housing level is not ready to publish.");
-        return;
+        return false;
     }
 
     if (!check_mkdir("Housing public map directory", &public_dir, true))
     {
         mprf(MSGCH_ERROR, "The Housing map could not be published.");
-        return;
+        return false;
     }
     string account_dir = catpath(public_dir, account_id);
     if (!check_mkdir("Housing account map directory", &account_dir, true))
     {
         mprf(MSGCH_ERROR, "The Housing map could not be published.");
-        return;
+        return false;
     }
 
     try
     {
-        _write_public_snapshot(catpath(account_dir, map_id + ".hmap"),
-                               account_id, map_id);
-
-        // The authenticated server still stores the authoritative snapshot by
-        // immutable account id. This validated name index lets the already
-        // running Crawl process resolve a portal without a WebTiles handoff.
+        // Bind the display name before exposing a numeric payload. A crash in
+        // between makes a new name temporarily unavailable; it can never make
+        // that name select another account or a duplicate by-name generation.
         string by_name_dir = catpath(public_dir, "by-name");
         if (!check_mkdir("Housing name index directory", &by_name_dir, true))
             fail("could not create Housing name index");
@@ -2476,12 +3376,28 @@ void housing_publish_current_map()
         {
             fail("could not create Housing owner name index");
         }
-        _write_public_snapshot(catpath(owner_dir, map_id + ".hmap"),
+        if (!_bind_public_owner(public_dir, you.your_name, account_id))
+            fail("Housing owner name is bound to another account");
+
+        // This is the sole payload generation written by current cores.
+        // Direct travel resolves the stable binding back to this same atomic
+        // account-id file; legacy by-name map files are discovery metadata
+        // only and are never served as a competing payload generation.
+        _write_public_snapshot(catpath(account_dir, map_id + ".hmap"),
                                account_id, map_id);
+        return true;
+    }
+    catch (const std::exception &error)
+    {
+        dprf("Housing map publication failed: %s", error.what());
+        mprf(MSGCH_ERROR, "The Housing map could not be published.");
+        return false;
     }
     catch (...)
     {
+        dprf("Housing map publication failed with a non-standard exception");
         mprf(MSGCH_ERROR, "The Housing map could not be published.");
+        return false;
     }
 }
 
