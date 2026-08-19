@@ -47,6 +47,9 @@ dungeon_feature_type housing_last_feature();
 void housing_set_last_feature(dungeon_feature_type feat);
 bool housing_valid_map_target(const string &target);
 bool housing_create_portal(const coord_def &pos, const string &target);
+// Create one persistable, no-reward Housing monster from a plain canonical
+// monster name. Map-definition specs and unsafe derived actors are rejected.
+bool housing_create_monster();
 bool housing_portal_is_valid(const coord_def &pos);
 // Returns true if the square was a Housing portal (including malformed ones).
 // A valid portal is resolved and loaded by the Crawl process. Foreign maps

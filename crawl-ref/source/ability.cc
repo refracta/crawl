@@ -770,6 +770,10 @@ static vector<ability_def> &_get_ability_list()
             abflag::instant | abflag::target },
         { ABIL_HOUSING_RETURN_HOME, "Return home",
             0, 0, 0, -1, {}, abflag::instant },
+        { ABIL_HOUSING_CREATE_MONSTER, "Create a housing monster",
+            0, 0, 0, -1, {}, abflag::instant },
+        { ABIL_HOUSING_CALL_MERCHANT, "Call a housing merchant",
+            0, 0, 0, -1, {}, abflag::instant },
 #ifdef WIZARD
         { ABIL_WIZ_BUILD_TERRAIN, "Build terrain",
             0, 0, 0, LOS_MAX_RANGE, {}, abflag::instant },
@@ -1850,8 +1854,9 @@ static bool _check_ability_possible(const ability_def& abil, bool quiet = false)
         else
         {
 #ifndef WIZARD
-            if (abil.ability != ABIL_HOUSING_ACQUIRE
-                && abil.ability != ABIL_HOUSING_CREATE_PORTAL)
+            if (abil.ability == ABIL_HOUSING_BUILD_TERRAIN
+                || abil.ability == ABIL_HOUSING_SET_TERRAIN
+                || abil.ability == ABIL_HOUSING_CLEAR_TERRAIN)
             {
                 if (!quiet)
                     mpr("Housing terrain editing is unavailable in this build.");
@@ -4268,6 +4273,24 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
             return spret::abort;
         return spret::success;
 
+    case ABIL_HOUSING_CREATE_MONSTER:
+        if (!housing_authorize_action("create a monster", 0)
+            || !housing_create_monster())
+        {
+            return spret::abort;
+        }
+        housing_checkpoint();
+        return spret::success;
+
+    case ABIL_HOUSING_CALL_MERCHANT:
+        if (!housing_authorize_action("call a merchant", 0)
+            || !housing_call_merchant())
+        {
+            return spret::abort;
+        }
+        housing_checkpoint();
+        return spret::success;
+
 #ifdef WIZARD
     case ABIL_WIZ_BUILD_TERRAIN:
     {
@@ -4511,8 +4534,9 @@ bool player_has_ability(ability_type abil, bool include_unusable)
         if (abil == ABIL_HOUSING_RETURN_HOME)
             return housing_is_visitor();
 #ifndef WIZARD
-        if (abil != ABIL_HOUSING_ACQUIRE
-            && abil != ABIL_HOUSING_CREATE_PORTAL)
+        if (abil == ABIL_HOUSING_BUILD_TERRAIN
+            || abil == ABIL_HOUSING_SET_TERRAIN
+            || abil == ABIL_HOUSING_CLEAR_TERRAIN)
             return false;
 #endif
         return housing_is_owner();
@@ -4675,6 +4699,8 @@ vector<talent> your_talents(bool include_unusable, bool ignore_piety)
             ABIL_HOUSING_CLEAR_TERRAIN,
             ABIL_HOUSING_CREATE_PORTAL,
             ABIL_HOUSING_RETURN_HOME,
+            ABIL_HOUSING_CREATE_MONSTER,
+            ABIL_HOUSING_CALL_MERCHANT,
             ABIL_EVOKE_BLINK,
             ABIL_EVOKE_TURN_INVISIBLE,
             ABIL_EVOKE_DISPATER,
@@ -4909,6 +4935,11 @@ int find_ability_slot(const ability_type abil, char firstletter)
 
     case ABIL_HOUSING_RETURN_HOME:
         first_slot = letter_to_index('R');
+        break;
+
+    case ABIL_HOUSING_CREATE_MONSTER:
+    case ABIL_HOUSING_CALL_MERCHANT:
+        first_slot = letter_to_index('H');
         break;
 
 #ifdef WIZARD

@@ -3549,7 +3549,7 @@ static void _setup_gozag_shop(int index, vector<shop_type> &valid_shops)
  * @return          The shop description.
  *                  E.g. "[a]   973 gold - Cranius' Magic Scroll Boutique"
  */
-static string _describe_gozag_shop(int index)
+static string _describe_gozag_shop(int index, bool free = false)
 {
     const int cost = _gozag_shop_price(index);
 
@@ -3562,6 +3562,12 @@ static string _describe_gozag_shop(int index)
     const string suffix =
         you.props[make_stringf(GOZAG_SHOP_SUFFIX_KEY, index)].get_string();
 
+    if (free)
+    {
+        return make_stringf("  [%c]  free - %s %s %s",
+                            offer_letter, shop_name.c_str(),
+                            type_name.c_str(), suffix.c_str());
+    }
     return make_stringf("  [%c] %5d gold - %s %s %s",
                         offer_letter,
                         cost,
@@ -3576,25 +3582,26 @@ static string _describe_gozag_shop(int index)
  * @param   The index of the chosen shop; -1 if we had to return early
  *          due to seen_hup being set.
  */
-static int _gozag_choose_shop()
+static int _gozag_choose_shop(bool free = false)
 {
     if (crawl_state.seen_hups)
         return -1;
 
     clear_messages();
     for (int i = 0; i < GOZAG_MAX_SHOPS; i++)
-        mpr_nojoin(MSGCH_PLAIN, _describe_gozag_shop(i).c_str());
+        mpr_nojoin(MSGCH_PLAIN, _describe_gozag_shop(i, free).c_str());
 
-    mprf(MSGCH_PROMPT, "Fund which merchant?");
+    mprf(MSGCH_PROMPT, free ? "Call which merchant?"
+                            : "Fund which merchant?");
     const int shop_index = toalower(get_ch()) - 'a';
     if (shop_index < 0 || shop_index > GOZAG_MAX_SHOPS - 1)
-        return _gozag_choose_shop(); // tail recurse
+        return _gozag_choose_shop(free); // tail recurse
 
-    if (you.gold < _gozag_shop_price(shop_index))
+    if (!free && you.gold < _gozag_shop_price(shop_index))
     {
         mpr("You don't have enough gold to fund that merchant!");
         more();
-        return _gozag_choose_shop(); // tail recurse
+        return _gozag_choose_shop(free); // tail recurse
     }
 
     return shop_index;
@@ -3630,7 +3637,7 @@ static string _gozag_shop_spec(int index)
  *
  * @param index     The index of the shop (in gozag props)
  */
-static void _gozag_place_shop(int index)
+static void _gozag_place_shop(int index, bool wrath_marker = true)
 {
     ASSERT(env.grid(you.pos()) == DNGN_FLOOR);
     keyed_mapspec kmspec;
@@ -3643,7 +3650,8 @@ static void _gozag_place_shop(int index)
     dungeon_terrain_changed(you.pos(), DNGN_ENTER_SHOP);
 
     link_items();
-    env.markers.add(new map_feature_marker(you.pos(), DNGN_ABANDONED_SHOP));
+    if (wrath_marker)
+        env.markers.add(new map_feature_marker(you.pos(), DNGN_ABANDONED_SHOP));
 
     shop_struct *shop = shop_at(you.pos());
     ASSERT(shop);
@@ -3728,6 +3736,40 @@ bool gozag_call_merchant()
         you.props.erase(make_stringf(GOZAG_SHOP_COST_KEY, j));
     }
 
+    return true;
+}
+
+bool housing_call_merchant()
+{
+    if (env.grid(you.pos()) != DNGN_FLOOR)
+    {
+        mpr("You need to be standing on unoccupied floor to call a merchant.");
+        return false;
+    }
+
+    vector<shop_type> valid_shops;
+    for (int i = 0; i < NUM_SHOPS; ++i)
+    {
+        const shop_type type = static_cast<shop_type>(i);
+        if (_shop_type_valid(type))
+            valid_shops.push_back(type);
+    }
+    for (int i = 0; i < GOZAG_MAX_SHOPS; ++i)
+        if (!you.props.exists(make_stringf(GOZAG_SHOPKEEPER_NAME_KEY, i)))
+            _setup_gozag_shop(i, valid_shops);
+
+    const int shop_index = _gozag_choose_shop(true);
+    if (shop_index == -1)
+        return false;
+
+    _gozag_place_shop(shop_index, false);
+    for (int i = 0; i < GOZAG_MAX_SHOPS; ++i)
+    {
+        you.props.erase(make_stringf(GOZAG_SHOPKEEPER_NAME_KEY, i));
+        you.props.erase(make_stringf(GOZAG_SHOP_TYPE_KEY, i));
+        you.props.erase(make_stringf(GOZAG_SHOP_SUFFIX_KEY, i));
+        you.props.erase(make_stringf(GOZAG_SHOP_COST_KEY, i));
+    }
     return true;
 }
 

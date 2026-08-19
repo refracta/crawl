@@ -2,6 +2,7 @@
 
 #include "AppHdr.h"
 
+#include "ability-type.h"
 #include "branch.h"
 #include "dungeon.h"
 #include "housing.h"
@@ -66,6 +67,27 @@ TEST_CASE("Housing map target validation is strict ASCII", "[single-file]")
     REQUIRE_FALSE(housing_valid_map_target("abc:map-name"));
     REQUIRE_FALSE(housing_valid_map_target("abc:mäp"));
     REQUIRE_FALSE(housing_valid_map_target("abc:123456789012345678901"));
+}
+
+TEST_CASE("Housing terrain permits decorative hazards and altars safely",
+          "[single-file]")
+{
+    REQUIRE(housing_feature_allowed(DNGN_SHALLOW_WATER));
+    REQUIRE(housing_feature_allowed(DNGN_DEEP_WATER));
+    REQUIRE(housing_feature_allowed(DNGN_LAVA));
+    REQUIRE(housing_feature_allowed(DNGN_ALTAR_ZIN));
+
+    // A runelight is reserved for an authenticated Housing spawn fixture;
+    // generic terrain editing must not be able to forge one.
+    REQUIRE_FALSE(housing_feature_allowed(DNGN_RUNELIGHT));
+    REQUIRE_FALSE(housing_feature_allowed(DNGN_UNKNOWN_ALTAR));
+}
+
+TEST_CASE("Housing ability ids remain append-only", "[single-file]")
+{
+    REQUIRE(static_cast<int>(ABIL_HOUSING_RETURN_HOME) == 9005);
+    REQUIRE(static_cast<int>(ABIL_HOUSING_CREATE_MONSTER) == 9007);
+    REQUIRE(static_cast<int>(ABIL_HOUSING_CALL_MERCHANT) == 9008);
 }
 
 TEST_CASE("Package chunks can be copied without sharing storage",
