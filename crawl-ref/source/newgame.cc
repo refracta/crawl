@@ -1023,8 +1023,7 @@ bool choose_game(newgame_def& ng, newgame_def& choice,
     ng.map  = choice.map;
 
     if (ng.type == GAME_TYPE_SPRINT
-        || ng.type == GAME_TYPE_TUTORIAL
-        || ng.type == GAME_TYPE_HOUSING)
+        || ng.type == GAME_TYPE_TUTORIAL)
     {
         _choose_gamemode_map(ng, choice, defaults);
     }
@@ -1032,6 +1031,13 @@ bool choose_game(newgame_def& ng, newgame_def& choice,
         _choose_seed(ng, choice, defaults);
 
     _choose_char(ng, choice, defaults);
+
+    // A Housing branch is a property of the new home, rather than of the
+    // character. Choose it after species/background/weapon selection so the
+    // chargen flow reads naturally and the ordinary character menus stay
+    // unchanged.
+    if (ng.type == GAME_TYPE_HOUSING)
+        _choose_gamemode_map(ng, choice, defaults);
 
     // Set these again, since _mark_fully_random may reset ng.
     ng.name = choice.name;
@@ -2170,10 +2176,17 @@ static void _construct_gamemode_map_menu(const mapref_vector& maps,
         _add_menu_sub_item(sub_items, 0, 0, "% - List aptitudes",
                 "Lists the numerical skill train aptitudes for all races",
                 '%', M_APTITUDES);
-        _add_menu_sub_item(sub_items, 0, 1, "? - Help",
-                "Opens the help screen", '?', M_HELP);
-        _add_menu_sub_item(sub_items, 1, 0, "* - Random map",
-                "Picks a random sprint map", '*', M_RANDOM);
+        if (crawl_state.game_is_sprint())
+        {
+            _add_menu_sub_item(sub_items, 0, 1, "? - Help",
+                    "Opens the help screen", '?', M_HELP);
+        }
+        const bool housing = crawl_state.game_is_housing();
+        _add_menu_sub_item(sub_items, 1, 0,
+                housing ? "* - Random branch" : "* - Random map",
+                housing ? "Picks a random Housing branch style"
+                        : "Picks a random sprint map",
+                '*', M_RANDOM);
     }
 
     // TODO: let players escape back to first screen menu
@@ -2219,7 +2232,9 @@ static void _prompt_gamemode_map(newgame_def& ng, newgame_def& ng_choice,
 
     welcome.textcolour(CYAN);
     welcome.cprintf("\nYou have a choice of %s:",
-            ng_choice.type == GAME_TYPE_TUTORIAL ? "lessons" : "maps");
+            ng_choice.type == GAME_TYPE_TUTORIAL ? "lessons"
+          : ng_choice.type == GAME_TYPE_HOUSING ? "Housing branches"
+                                                : "maps");
 
     auto vbox = make_shared<Box>(Box::VERT);
     vbox->set_cross_alignment(Widget::Align::STRETCH);
@@ -2323,25 +2338,33 @@ static void _choose_gamemode_map(newgame_def& ng, newgame_def& ng_choice,
 {
     // Sprint, Tutorial, or Housing.
     const bool is_sprint = (ng_choice.type == GAME_TYPE_SPRINT);
+    const bool is_housing = (ng_choice.type == GAME_TYPE_HOUSING);
 
-    // Housing currently has exactly one canonical owner map. Do not allow an
-    // rc `map` setting to substitute an arbitrary vault with stairs, markers,
-    // or other state outside the Housing invariants.
-    if (ng_choice.type == GAME_TYPE_HOUSING)
-    {
-        ng_choice.map = "housing_main";
-        ng.map = ng_choice.map;
-        return;
-    }
-
-    const string type_name = gametype_to_str(ng_choice.type);
+    // Keep starter homes in their own allowlisted tag. Future Housing vaults
+    // (for example templates used by map management) must not become chargen
+    // choices merely because they carry the general `housing` tag.
+    const string type_name = is_housing ? "housing_start"
+                                        : gametype_to_str(ng_choice.type);
 
     const mapref_vector maps = find_maps_for_tag(type_name);
 
     if (maps.empty())
         end(1, true, "No %s maps found.", type_name.c_str());
 
-    if (ng_choice.map.empty())
+    // Never accept an arbitrary rc-supplied map for a fixed game mode. It
+    // must be one of the vaults carrying that mode's tag.
+    if (!ng_choice.map.empty()
+        && ng_choice.map != "random"
+        && std::none_of(maps.begin(), maps.end(), [&](const map_def *map) {
+               return map->name == ng_choice.map;
+           }))
+    {
+        ng_choice.map.clear();
+    }
+
+    if (is_housing && maps.size() > 1)
+        _prompt_gamemode_map(ng, ng_choice, defaults, maps);
+    else if (ng_choice.map.empty())
     {
         if (is_sprint
             && ng_choice.type == !crawl_state.sprint_map.empty())

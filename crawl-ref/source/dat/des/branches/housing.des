@@ -1,22 +1,211 @@
+# Housing homes deliberately share one compact, square footprint. The
+# selected vault changes only the branch styling; all persistent Housing map
+# identifiers remain independent of ordinary Crawl level ids.
+
 NAME: housing_main
-TAGS: housing no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+DESC: Dungeon
+ORDER: 1
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
 ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightgrey
+LROCKCOL: brown
+LFLOORTILE: floor_normal
+LROCKTILE: wall_normal
 MAP
-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-x...............................x
-x...............................x
-x...............................x
-x...............................x
-x...............................x
-x...............................x
-x...............................x
-x...............@...............x
-x...............................x
-x...............................x
-x...............................x
-x...............................x
-x...............................x
-x...............................x
-x...............................x
-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_lair
+DESC: Lair of Beasts
+ORDER: 2
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: green
+LROCKCOL: brown
+LFLOORTILE: floor_lair
+LROCKTILE: wall_lair
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_orc
+DESC: Orcish Mines
+ORDER: 3
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: brown
+LROCKCOL: brown
+LFLOORTILE: floor_orc
+LROCKTILE: wall_orc
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_swamp
+DESC: Swamp
+ORDER: 4
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: brown
+LROCKCOL: green
+LFLOORTILE: floor_swamp
+LROCKTILE: wall_swamp
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_vaults
+DESC: Vaults
+ORDER: 5
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightgrey
+LROCKCOL: white
+LFLOORTILE: floor_vault
+LROCKTILE: wall_vault
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_crypt
+DESC: Crypt
+ORDER: 6
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: darkgrey
+LROCKCOL: lightgrey
+LFLOORTILE: floor_tomb
+LROCKTILE: wall_crypt
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_depths
+DESC: Depths
+ORDER: 7
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightgrey
+LROCKCOL: yellow
+LFLOORTILE: floor_depthstone
+LROCKTILE: wall_depths_crystal
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_zot
+DESC: Realm of Zot
+ORDER: 8
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: magenta
+LROCKCOL: lightmagenta
+LFLOORTILE: floor_zot_diamonds
+LROCKTILE: wall_zot_magenta
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
 ENDMAP
