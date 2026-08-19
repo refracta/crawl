@@ -31,6 +31,7 @@
 #include "errors.h"
 #include "files.h"
 #include "god-companions.h"
+#include "god-passive.h"
 #include "initfile.h"
 #include "mapmark.h"
 #include "macro.h"
@@ -74,7 +75,13 @@ static const char * const HOUSING_LEVEL_CHUNK = "level";
 static const char * const HOUSING_PORTAL_TARGET_KEY = "housing_target";
 static const char * const HOUSING_SPAWN_MARKER_KEY = "housing_spawn";
 static const char * const HOUSING_MONSTER_KEY = "housing_created_monster";
-static const int HOUSING_SNAPSHOT_SCHEMA = 1;
+static const int HOUSING_SNAPSHOT_LEGACY_SCHEMA = 1;
+// Schema 2 permits the strictly validated spawn fixtures, Housing monsters,
+// and shops introduced by this build. Old cores reject it instead of loading
+// actors without the corresponding MID and payload validation.
+static const int HOUSING_SNAPSHOT_SCHEMA = 2;
+static const int HOUSING_MAX_MONSTERS = 64;
+static const int HOUSING_MAX_SHOPS = 32;
 static int _housing_turn_origin = -1;
 static bool _housing_runtime_initialized = false;
 static bool _housing_started_as_visitor = false;
@@ -270,6 +277,12 @@ static housing_snapshot_meta _read_snapshot_meta(package &snapshot)
     return meta;
 }
 
+static bool _supported_snapshot_schema(int schema)
+{
+    return schema == HOUSING_SNAPSHOT_LEGACY_SCHEMA
+           || schema == HOUSING_SNAPSHOT_SCHEMA;
+}
+
 static void _write_snapshot_meta(package &snapshot, const string &account_id,
                                  const string &map_id)
 {
@@ -374,7 +387,7 @@ package *housing_open_save_for_restore(const string &filename)
         save = new package(filename.c_str(), true);
         package snapshot(snapshot_path.c_str(), false);
         const housing_snapshot_meta meta = _read_snapshot_meta(snapshot);
-        if (meta.schema != HOUSING_SNAPSHOT_SCHEMA
+        if (!_supported_snapshot_schema(meta.schema)
             || meta.account_id != target_account_id
             || meta.map_id != target_map
             || _lowercase_ascii(meta.owner_name)
@@ -448,6 +461,25 @@ void housing_scrub_visitor_transition_state()
     you.prev_targ = MID_NOBODY;
     if (you.pet_target != MHITYOU)
         you.pet_target = MHITNOT;
+
+    // These player properties point at actors in the outgoing level. Imported
+    // Housing monsters use another owner's MID namespace, so retaining any of
+    // them could bind a spell, familiar, or god effect to an unrelated actor.
+    you.duration[DUR_DIMENSIONAL_BULLSEYE] = 0;
+    you.props.erase(BULLSEYE_TARGET_KEY);
+    you.props.erase(BATTLESPHERE_KEY);
+    you.props.erase("TELEPORTITIS_SOURCE");
+    you.props.erase(DITH_SHADOW_MID_KEY);
+    you.props.erase(DITH_SHADOW_LAST_TARGET_KEY);
+    you.props.erase(DITH_SHADOW_ATTACK_KEY);
+    you.props.erase(DITH_SHADOW_SPELLPOWER_KEY);
+    you.props.erase(SOLAR_EMBER_MID_KEY);
+    you.props.erase(SOLAR_EMBER_REVIVAL_KEY);
+    you.props.erase("canine_familiar_mid");
+    if (you.props.exists(WATER_HOLDER_KEY))
+        you.props[WATER_HOLDER_KEY].get_int() = MID_NOBODY;
+    for (item_def &item : you.inv)
+        item.props.erase(SPECTRAL_WEAPON_KEY);
 
     companion_list.clear();
     the_lost_ones.clear();
@@ -854,9 +886,12 @@ static bool _housing_monster_type_allowed(monster_type type)
 {
     if (type <= MONS_PROGRAM_BUG || type >= NUM_MONSTERS
         || mons_is_unique(type) || mons_is_pghost(type)
+        || mons_class_is_test(type) || mons_class_is_peripheral(type)
         || mons_is_projectile(type) || mons_is_seeker(type)
+        || mons_is_tentacle_head(type)
         || mons_is_tentacle_or_tentacle_segment(type)
-        || mons_class_flag(type, M_CANT_SPAWN | M_PERIPHERAL | M_UNFINISHED))
+        || mons_class_flag(type, M_CANT_SPAWN | M_UNFINISHED | M_UNSTABLE
+                                 | M_NO_GEN_DERIVED | M_ANCESTOR | M_AVATAR))
     {
         return false;
     }
@@ -865,6 +900,15 @@ static bool _housing_monster_type_allowed(monster_type type)
 
 bool housing_create_monster()
 {
+    const int live_monsters = std::count_if(
+        menv_real.begin(), menv_real.end(),
+        [](const monster &mons) { return mons.alive(); });
+    if (live_monsters >= HOUSING_MAX_MONSTERS)
+    {
+        mpr("This Housing map already has the maximum number of monsters.");
+        return false;
+    }
+
     char name[128];
     mprf(MSGCH_PROMPT, "Monster name: ");
     if (cancellable_get_line_autohist(name, sizeof name) || !*name)
@@ -901,6 +945,11 @@ bool housing_create_monster()
     return true;
 }
 
+bool housing_can_create_shop()
+{
+    return env.shop.size() < HOUSING_MAX_SHOPS;
+}
+
 static bool _split_map_target(const string &target, string &owner,
                               string &map_id)
 {
@@ -928,7 +977,7 @@ static std::unique_ptr<package> _open_public_snapshot(const string &owner,
 
     std::unique_ptr<package> snapshot(new package(snapshot_path.c_str(), false));
     meta = _read_snapshot_meta(*snapshot);
-    if (meta.schema != HOUSING_SNAPSHOT_SCHEMA
+    if (!_supported_snapshot_schema(meta.schema)
         || !_is_decimal_id(meta.account_id)
         || meta.map_id != map_id
         || _lowercase_ascii(meta.owner_name) != _lowercase_ascii(owner)
@@ -1412,7 +1461,7 @@ static bool _current_map_can_be_published()
     for (const monster &mons : menv_real)
         if (mons.alive())
         {
-            if (++housing_monsters > 64
+            if (++housing_monsters > HOUSING_MAX_MONSTERS
                 || !_housing_monster_can_be_published(mons))
             {
                 mprf(MSGCH_ERROR,
@@ -1422,7 +1471,7 @@ static bool _current_map_can_be_published()
             }
         }
 
-    if (env.shop.size() > 32)
+    if (env.shop.size() > HOUSING_MAX_SHOPS)
     {
         mprf(MSGCH_ERROR, "Housing publish rejected: too many shops.");
         return false;

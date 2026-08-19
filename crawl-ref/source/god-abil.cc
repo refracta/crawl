@@ -44,6 +44,7 @@
 #include "god-passive.h"
 #include "hints.h"
 #include "hiscores.h"
+#include "housing.h"
 #include "invent.h"
 #include "item-prop.h"
 #include "item-status-flag-type.h"
@@ -111,6 +112,7 @@
 #include "timed-effects.h"
 #include "transform.h" // untransform
 #include "traps.h"
+#include "unwind.h"
 #include "viewchar.h"
 #include "view.h"
 
@@ -3745,6 +3747,24 @@ bool housing_call_merchant()
     {
         mpr("You need to be standing on unoccupied floor to call a merchant.");
         return false;
+    }
+    if (!housing_can_create_shop())
+    {
+        mpr("This Housing map already has the maximum number of shops.");
+        return false;
+    }
+
+    // The ordinary Gozag ability deliberately keeps generated offers in
+    // player properties across prompts and HUPs. Housing borrows only the
+    // generator: restore the complete property table on every exit so a free
+    // Housing shop cannot consume or replace a real Gozag offer.
+    unwind_var<CrawlHashTable> restore_player_props(you.props);
+    for (int i = 0; i < GOZAG_MAX_SHOPS; ++i)
+    {
+        you.props.erase(make_stringf(GOZAG_SHOPKEEPER_NAME_KEY, i));
+        you.props.erase(make_stringf(GOZAG_SHOP_TYPE_KEY, i));
+        you.props.erase(make_stringf(GOZAG_SHOP_SUFFIX_KEY, i));
+        you.props.erase(make_stringf(GOZAG_SHOP_COST_KEY, i));
     }
 
     vector<shop_type> valid_shops;
