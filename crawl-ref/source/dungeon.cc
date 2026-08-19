@@ -7860,6 +7860,12 @@ static void _mark_solid_squares()
 // Based on their starting class, where does the player start?
 int starting_absdepth()
 {
+    // Housing is a single D:1 map regardless of background. In particular,
+    // Delvers must not carry their normal D:5 starting depth into a branch
+    // whose only valid depth is 1.
+    if (crawl_state.game_is_housing())
+        return 0;
+
     if (you.char_class == JOB_DELVER)
     {
         // makes delver sort of work in descent

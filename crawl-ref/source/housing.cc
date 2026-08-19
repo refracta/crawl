@@ -20,6 +20,7 @@
 
 #include "act-iter.h"
 #include "actor.h"
+#include "branch.h"
 #include "cloud.h"
 #include "coord.h"
 #include "coordit.h"
@@ -344,6 +345,22 @@ package *housing_open_save_for_restore(const string &filename)
     }
 
     return save;
+}
+
+void housing_normalize_legacy_delver_depth()
+{
+    // Before Housing forced Delvers to its sole D:1 level, their character
+    // location was saved as D:5 while the same save correctly recorded the
+    // Housing branch depth as 1. Repair only that known legacy tuple; other
+    // out-of-range locations should still fail the normal save validation.
+    if (crawl_state.game_is_housing()
+        && you.char_class == JOB_DELVER
+        && you.where_are_you == BRANCH_DUNGEON
+        && you.depth == 5
+        && brdepth[BRANCH_DUNGEON] == 1)
+    {
+        you.depth = 1;
+    }
 }
 
 void housing_scrub_visitor_transition_state()

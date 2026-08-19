@@ -53,6 +53,7 @@
 #include "god-abil.h" // just for the Ru sac penalty key
 #include "god-passive.h"
 #include "god-companions.h"
+#include "housing.h"
 #include "invent.h"
 #include "item-name.h"
 #include "item-prop.h"
@@ -5544,6 +5545,7 @@ static void _tag_read_you_dungeon(reader &th)
         brdepth[BRANCH_ABYSS] = 7;
 #endif
 
+    housing_normalize_legacy_delver_depth();
     ASSERT(you.depth <= brdepth[you.where_are_you]);
 
     // Root of the dungeon; usually BRANCH_DUNGEON.

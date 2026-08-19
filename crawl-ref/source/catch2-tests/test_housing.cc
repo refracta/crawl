@@ -2,8 +2,56 @@
 
 #include "AppHdr.h"
 
+#include "branch.h"
+#include "dungeon.h"
 #include "housing.h"
+#include "jobs.h"
 #include "package.h"
+#include "player.h"
+#include "state.h"
+#include "unwind.h"
+
+TEST_CASE("Housing Delvers start on the single Housing floor",
+          "[single-file]")
+{
+    unwind_var<game_type> saved_game_type(crawl_state.type,
+                                          GAME_TYPE_HOUSING);
+    unwind_var<job_type> saved_job(you.char_class, JOB_DELVER);
+
+    REQUIRE(starting_absdepth() == 0);
+
+    crawl_state.type = GAME_TYPE_NORMAL;
+    REQUIRE(starting_absdepth() == 4);
+}
+
+TEST_CASE("Legacy Housing Delver depth is normalized narrowly",
+          "[single-file]")
+{
+    unwind_var<game_type> saved_game_type(crawl_state.type,
+                                          GAME_TYPE_HOUSING);
+    unwind_var<job_type> saved_job(you.char_class, JOB_DELVER);
+    unwind_var<branch_type> saved_branch(you.where_are_you, BRANCH_DUNGEON);
+    unwind_var<int> saved_depth(you.depth, 5);
+    unwind_var<int> saved_dungeon_depth(brdepth[BRANCH_DUNGEON], 1);
+
+    housing_normalize_legacy_delver_depth();
+    REQUIRE(you.depth == 1);
+
+    // Do not turn the hook into a general corrupted-save repair path.
+    you.depth = 4;
+    housing_normalize_legacy_delver_depth();
+    REQUIRE(you.depth == 4);
+
+    you.depth = 5;
+    you.char_class = JOB_FIGHTER;
+    housing_normalize_legacy_delver_depth();
+    REQUIRE(you.depth == 5);
+
+    you.char_class = JOB_DELVER;
+    crawl_state.type = GAME_TYPE_NORMAL;
+    housing_normalize_legacy_delver_depth();
+    REQUIRE(you.depth == 5);
+}
 
 TEST_CASE("Housing map target validation is strict ASCII", "[single-file]")
 {

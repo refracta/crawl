@@ -310,8 +310,13 @@ static void _post_init(bool newc)
         tiles.set_ui_state(UI_NORMAL);
 #endif
 
-    load_level(you.entering_level ? you.transit_stair :
-               you.char_class == JOB_DELVER ? DNGN_STONE_STAIRS_UP_I : DNGN_STONE_STAIRS_DOWN_I,
+    // Delvers normally enter their deeper starting floor from downstairs.
+    // Housing forces every background to D:1, so use the ordinary D:1 entry
+    // semantics there as well.
+    const dungeon_feature_type starting_stair =
+        you.char_class == JOB_DELVER && starting_absdepth() > 0
+            ? DNGN_STONE_STAIRS_UP_I : DNGN_STONE_STAIRS_DOWN_I;
+    load_level(you.entering_level ? you.transit_stair : starting_stair,
                you.entering_level ? LOAD_ENTER_LEVEL :
                newc               ? LOAD_START_GAME : LOAD_RESTART_GAME,
                old_level);

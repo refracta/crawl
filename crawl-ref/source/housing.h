@@ -61,6 +61,9 @@ void housing_checkpoint();
 // disposable copies; before restore, their D:1 chunk is replaced with the
 // read-only public snapshot selected by the authenticated WebTiles session.
 package *housing_open_save_for_restore(const string &filename);
+// Repair the exact invalid location written by pre-fix Housing Delvers. This
+// is called after TAG_YOU restores branch depths and before validating them.
+void housing_normalize_legacy_delver_depth();
 void housing_scrub_visitor_transition_state();
 void housing_publish_current_map();
 
