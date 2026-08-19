@@ -11,6 +11,7 @@
 #include "housing.h"
 #include "jobs.h"
 #include "mapmark.h"
+#include "menu.h"
 #include "mon-util.h"
 #include "package.h"
 #include "player.h"
@@ -88,6 +89,44 @@ TEST_CASE("Housing map target validation is strict ASCII", "[single-file]")
     REQUIRE_FALSE(housing_valid_map_target("abc:map-name"));
     REQUIRE_FALSE(housing_valid_map_target("abc:mäp"));
     REQUIRE_FALSE(housing_valid_map_target("abc:123456789012345678901"));
+}
+
+TEST_CASE("Housing branch theme ids and menu order are stable",
+          "[single-file]")
+{
+    REQUIRE(housing_branch_theme_count() == 37);
+    REQUIRE(housing_branch_theme_catalog_valid());
+
+    // These ids already exist in canonical multi-map saves and are therefore
+    // append-only even though the display order follows Crawl's branch order.
+    const char *legacy[] = {
+        "Dungeon", "Lair of Beasts", "Orcish Mines", "Swamp", "Vaults",
+        "Crypt", "Depths", "Realm of Zot",
+    };
+    for (int id = 0; id < static_cast<int>(ARRAYSZ(legacy)); ++id)
+        REQUIRE(string(housing_branch_theme_name(id)) == legacy[id]);
+
+    const int expected_order[] = {
+        0, 8, 1, 3, 10, 11, 12, 13, 2, 9, 4, 5, 14, 6, 15, 16, 17,
+        18, 19, 7, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+        32, 33, 34, 35, 36,
+    };
+    for (int position = 0;
+         position < static_cast<int>(ARRAYSZ(expected_order)); ++position)
+    {
+        REQUIRE(housing_branch_theme_menu_id(position)
+                == expected_order[position]);
+    }
+    REQUIRE(housing_branch_theme_menu_id(-1) == -1);
+    REQUIRE(housing_branch_theme_menu_id(ARRAYSZ(expected_order)) == -1);
+    REQUIRE(housing_branch_theme_name(-1) == nullptr);
+    REQUIRE(housing_branch_theme_name(housing_branch_theme_count()) == nullptr);
+
+    menu_letter hotkey('a');
+    string hotkeys;
+    for (int i = 0; i < housing_branch_theme_count(); ++i)
+        hotkeys += static_cast<char>(hotkey++);
+    REQUIRE(hotkeys == "abcdefghijklmnopqrstuvwxyzABCDEFGHIJK");
 }
 
 TEST_CASE("Housing terrain permits decorative hazards and altars safely",

@@ -2119,16 +2119,17 @@ static void _construct_gamemode_map_menu(const mapref_vector& maps,
 {
     string text;
     bool activate_next = defaults.map == "";
+    menu_letter letter('a');
 
     for (int i = 0; i < static_cast<int> (maps.size()); i++)
     {
         auto label = make_shared<Text>();
 
-        const char letter = 'a' + i;
+        const char hotkey = letter++;
 
         const string map_name = maps[i]->desc_or_name();
         text = " ";
-        text += letter;
+        text += hotkey;
         text += " - ";
         text += map_name;
 
@@ -2152,7 +2153,7 @@ static void _construct_gamemode_map_menu(const mapref_vector& maps,
         btn->set_child(std::move(label));
 #endif
         btn->id = i; // ID corresponds to location in vector
-        btn->hotkey = letter;
+        btn->hotkey = hotkey;
         main_items->add_button(btn, 0, i);
 
         if (activate_next)
@@ -2350,6 +2351,11 @@ static void _choose_gamemode_map(newgame_def& ng, newgame_def& ng_choice,
 
     if (maps.empty())
         end(1, true, "No %s maps found.", type_name.c_str());
+    // Uppercase X is reserved by this popup for immediate exit. a-z,A-W are
+    // therefore the largest contiguous menu_letter range with no collision.
+    if (maps.size() > 49)
+        end(1, true, "Too many %s maps for unique menu hotkeys.",
+            type_name.c_str());
 
     // Never accept an arbitrary rc-supplied map for a fixed game mode. It
     // must be one of the vaults carrying that mode's tag.

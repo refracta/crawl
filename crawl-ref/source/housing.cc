@@ -117,6 +117,9 @@ struct housing_theme_def
 
 static const housing_theme_def HOUSING_THEMES[] =
 {
+    // Indices 0-7 are persisted in existing multi-map saves. Never reorder
+    // them; new themes are append-only and the separate menu order below
+    // presents the natural Crawl branch progression.
     { "Dungeon", LIGHTGREY, BROWN, "floor_normal", "wall_normal" },
     { "Lair of Beasts", GREEN, BROWN, "floor_lair", "wall_lair" },
     { "Orcish Mines", BROWN, BROWN, "floor_orc", "wall_orc" },
@@ -127,7 +130,84 @@ static const housing_theme_def HOUSING_THEMES[] =
       "floor_depthstone", "wall_depths_crystal" },
     { "Realm of Zot", MAGENTA, LIGHTMAGENTA,
       "floor_zot_diamonds", "wall_zot_magenta" },
+    { "Ecumenical Temple", LIGHTGREY, BROWN,
+      "floor_vines", "wall_vines" },
+    { "Elven Halls", WHITE, LIGHTMAGENTA,
+      "floor_hall", "wall_hall" },
+    { "Shoals", BROWN, BROWN,
+      "floor_sand", "wall_shoals" },
+    { "Snake Pit", LIGHTGREEN, YELLOW,
+      "floor_mosaic", "wall_snake" },
+    { "Spider Nest", BROWN, YELLOW,
+      "floor_spider", "wall_spider" },
+    { "Slime Pits", BROWN, BROWN,
+      "floor_slime", "wall_slime" },
+    { "Tomb of the Ancients", BROWN, BROWN,
+      "floor_tomb", "wall_undead" },
+    { "Vestibule of Hell", LIGHTGREY, LIGHTRED,
+      "floor_cage", "wall_hell" },
+    { "Iron City of Dis", CYAN, BROWN,
+      "floor_iron", "wall_zot_cyan" },
+    { "Gehenna", BROWN, RED,
+      "floor_rough_red", "wall_zot_red" },
+    { "Cocytus", LIGHTBLUE, LIGHTCYAN,
+      "floor_frozen", "wall_ice" },
+    { "Tartarus", MAGENTA, MAGENTA,
+      "floor_black_cobalt", "wall_cobalt_rock" },
+    // These branches normally choose dynamic per-level colours. Housing uses
+    // one stable representative preset for each saved map theme.
+    { "Abyss", LIGHTGREY, LIGHTRED,
+      "floor_nerves_lightgray", "wall_abyss_lightred" },
+    { "Pandemonium", RED, YELLOW,
+      "floor_demonic_red", "wall_bars_yellow" },
+    { "Ziggurat", LIGHTGREY, BROWN,
+      "floor_etched", "wall_vault" },
+    { "Bazaar", BLUE, YELLOW,
+      "floor_vault", "wall_vault" },
+    { "Trove", DARKGREY, BLUE,
+      "floor_vault", "wall_vault" },
+    { "Sewer", LIGHTGREY, BLUE,
+      "floor_slime", "wall_oozing" },
+    { "Ossuary", WHITE, YELLOW,
+      "floor_sandstone", "wall_sandstone" },
+    { "Bailey", WHITE, LIGHTRED,
+      "floor_cobble_blood", "wall_brick_brown" },
+    { "Ice Cave", BLUE, WHITE,
+      "floor_ice", "wall_ice_block" },
+    { "Volcano", RED, RED,
+      "floor_rough_red", "wall_volcanic" },
+    // Wizlabs choose their appearance per vault. This is the representative
+    // mystic preset used by Housing.
+    { "Wizard's Laboratory", MAGENTA, LIGHTMAGENTA,
+      "floor_mystic_chasm", "wall_zot_magenta" },
+    { "Desolation of Salt", LIGHTGREY, BROWN,
+      "floor_salt", "wall_desolation" },
+    { "Gauntlet", LIGHTGREY, BROWN,
+      "floor_gauntlet", "wall_lab_rock" },
+    { "Arena", LIGHTGREY, CYAN,
+      "floor_normal", "wall_normal" },
+    { "Crucible of Flesh", LIGHTRED, RED,
+      "floor_cage", "wall_crucible" },
+    { "Necropolis", MAGENTA, LIGHTGREY,
+      "floor_necropolis_squares", "wall_catacombs" },
+    { "Gulch", GREEN, LIGHTBLUE,
+      "floor_gulch", "wall_gulch_brick" },
 };
+
+static const int HOUSING_THEME_MENU_ORDER[] =
+{
+    // Match Crawl's logical branch order, excluding the four retired TAG 34
+    // compatibility branches (Dwarf, Blade, Forest and Labyrinth).
+    0, 8, 1, 3, 10, 11, 12, 13, 2, 9, 4, 5, 14, 6, 15, 16, 17,
+    18, 19, 7, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+    33, 34, 35, 36,
+};
+static_assert(ARRAYSZ(HOUSING_THEME_MENU_ORDER) == ARRAYSZ(HOUSING_THEMES),
+              "Every Housing branch theme needs one menu entry");
+// The generic chargen map popup reserves uppercase X for immediate exit, so
+// keep Housing within a-z,A-W unless that UI learns to skip reserved keys.
+static_assert(ARRAYSZ(HOUSING_THEMES) <= 49,
+              "Housing branch hotkeys are limited to a-z and A-W");
 static int _housing_turn_origin = -1;
 static bool _housing_runtime_initialized = false;
 static bool _housing_started_as_visitor = false;
@@ -282,6 +362,52 @@ static bool _valid_housing_theme(int theme)
     return theme >= 0 && theme < static_cast<int>(ARRAYSZ(HOUSING_THEMES));
 }
 
+int housing_branch_theme_count()
+{
+    return ARRAYSZ(HOUSING_THEMES);
+}
+
+const char *housing_branch_theme_name(int stable_id)
+{
+    return _valid_housing_theme(stable_id) ? HOUSING_THEMES[stable_id].name
+                                           : nullptr;
+}
+
+int housing_branch_theme_menu_id(int position)
+{
+    return position >= 0
+           && position < static_cast<int>(ARRAYSZ(HOUSING_THEME_MENU_ORDER))
+           ? HOUSING_THEME_MENU_ORDER[position] : -1;
+}
+
+bool housing_branch_theme_catalog_valid()
+{
+    bool seen[ARRAYSZ(HOUSING_THEMES)] = {};
+    for (int position = 0;
+         position < static_cast<int>(ARRAYSZ(HOUSING_THEME_MENU_ORDER));
+         ++position)
+    {
+        const int theme = HOUSING_THEME_MENU_ORDER[position];
+        if (!_valid_housing_theme(theme) || seen[theme])
+            return false;
+        seen[theme] = true;
+    }
+
+    for (int theme = 0; theme < housing_branch_theme_count(); ++theme)
+    {
+        tileidx_t floor;
+        tileidx_t rock;
+        const housing_theme_def &definition = HOUSING_THEMES[theme];
+        if (!seen[theme] || !definition.name || !*definition.name
+            || !tile_dngn_index(definition.floor_tile, &floor)
+            || !tile_dngn_index(definition.rock_tile, &rock))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void _write_housing_map_theme(package &save, const string &map_id,
                                      int theme)
 {
@@ -305,6 +431,8 @@ static int _read_housing_map_theme(package &save, const string &map_id)
     input.set_safe_read(true);
     const int schema = unmarshallInt(input);
     const int theme = unmarshallInt(input);
+    // Stable append-only ids make an expanded theme fail closed on an older
+    // core whose catalog ends at 7, while legacy ids remain rollback-safe.
     if (schema != HOUSING_THEME_SCHEMA || !_valid_housing_theme(theme))
         corrupted("Housing map has an invalid branch theme");
     return theme;
@@ -3021,16 +3149,22 @@ static char _select_housing_map_action(const string &map_id,
 
 static int _select_housing_map_theme()
 {
+    if (!housing_branch_theme_catalog_valid())
+        fail("Housing branch theme catalog is invalid");
+
     Menu menu(MF_SINGLESELECT | MF_ARROWS_SELECT | MF_INIT_HOVER);
     menu.set_title(new MenuEntry("Choose a Housing branch theme", MEL_TITLE));
 
     vector<int> themes;
     themes.reserve(ARRAYSZ(HOUSING_THEMES));
     menu_letter hotkey('a');
-    for (int i = 0; i < static_cast<int>(ARRAYSZ(HOUSING_THEMES)); ++i)
+    for (int i = 0;
+         i < static_cast<int>(ARRAYSZ(HOUSING_THEME_MENU_ORDER)); ++i)
     {
-        themes.push_back(i);
-        auto *entry = new MenuEntry(HOUSING_THEMES[i].name, MEL_ITEM, 1,
+        const int theme = HOUSING_THEME_MENU_ORDER[i];
+        ASSERT(_valid_housing_theme(theme));
+        themes.push_back(theme);
+        auto *entry = new MenuEntry(HOUSING_THEMES[theme].name, MEL_ITEM, 1,
                                     static_cast<char>(hotkey++));
         entry->data = &themes.back();
         menu.add_entry(entry);

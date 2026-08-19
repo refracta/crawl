@@ -46,6 +46,13 @@ bool housing_snapshot_schema_supported(int schema);
 // map.
 bool housing_valid_map_id(const string &map_id);
 string housing_map_chunk_name(const string &map_id);
+// Branch themes have append-only stable ids because the id is stored in each
+// canonical map chunk. The menu order is independent and follows Crawl's
+// logical branch order; retired save-compatibility branches are omitted.
+int housing_branch_theme_count();
+const char *housing_branch_theme_name(int stable_id);
+int housing_branch_theme_menu_id(int position);
+bool housing_branch_theme_catalog_valid();
 // Return false for a legacy single-map save with no index. A present but
 // malformed index throws instead of guessing, so canonical data fails closed.
 bool housing_read_map_index(package &save, vector<string> &maps,

@@ -30,7 +30,7 @@ ENDMAP
 
 NAME: housing_lair
 DESC: Lair of Beasts
-ORDER: 2
+ORDER: 3
 TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
 ORIENT: encompass
 KFEAT: @ = runelight
@@ -56,7 +56,7 @@ ENDMAP
 
 NAME: housing_orc
 DESC: Orcish Mines
-ORDER: 3
+ORDER: 9
 TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
 ORIENT: encompass
 KFEAT: @ = runelight
@@ -108,7 +108,7 @@ ENDMAP
 
 NAME: housing_vaults
 DESC: Vaults
-ORDER: 5
+ORDER: 11
 TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
 ORIENT: encompass
 KFEAT: @ = runelight
@@ -134,7 +134,7 @@ ENDMAP
 
 NAME: housing_crypt
 DESC: Crypt
-ORDER: 6
+ORDER: 12
 TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
 ORIENT: encompass
 KFEAT: @ = runelight
@@ -160,7 +160,7 @@ ENDMAP
 
 NAME: housing_depths
 DESC: Depths
-ORDER: 7
+ORDER: 14
 TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
 ORIENT: encompass
 KFEAT: @ = runelight
@@ -186,7 +186,7 @@ ENDMAP
 
 NAME: housing_zot
 DESC: Realm of Zot
-ORDER: 8
+ORDER: 20
 TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
 ORIENT: encompass
 KFEAT: @ = runelight
@@ -194,6 +194,760 @@ LFLOORCOL: magenta
 LROCKCOL: lightmagenta
 LFLOORTILE: floor_zot_diamonds
 LROCKTILE: wall_zot_magenta
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_temple
+DESC: Ecumenical Temple
+ORDER: 2
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightgrey
+LROCKCOL: brown
+LFLOORTILE: floor_vines
+LROCKTILE: wall_vines
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_elf
+DESC: Elven Halls
+ORDER: 10
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: white
+LROCKCOL: lightmagenta
+LFLOORTILE: floor_hall
+LROCKTILE: wall_hall
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_shoals
+DESC: Shoals
+ORDER: 5
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: brown
+LROCKCOL: brown
+LFLOORTILE: floor_sand
+LROCKTILE: wall_shoals
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_snake
+DESC: Snake Pit
+ORDER: 6
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightgreen
+LROCKCOL: yellow
+LFLOORTILE: floor_mosaic
+LROCKTILE: wall_snake
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_spider
+DESC: Spider Nest
+ORDER: 7
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: brown
+LROCKCOL: yellow
+LFLOORTILE: floor_spider
+LROCKTILE: wall_spider
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_slime
+DESC: Slime Pits
+ORDER: 8
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: brown
+LROCKCOL: brown
+LFLOORTILE: floor_slime
+LROCKTILE: wall_slime
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_tomb
+DESC: Tomb of the Ancients
+ORDER: 13
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: brown
+LROCKCOL: brown
+LFLOORTILE: floor_tomb
+LROCKTILE: wall_undead
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_hell
+DESC: Vestibule of Hell
+ORDER: 15
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightgrey
+LROCKCOL: lightred
+LFLOORTILE: floor_cage
+LROCKTILE: wall_hell
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_dis
+DESC: Iron City of Dis
+ORDER: 16
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: cyan
+LROCKCOL: brown
+LFLOORTILE: floor_iron
+LROCKTILE: wall_zot_cyan
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_gehenna
+DESC: Gehenna
+ORDER: 17
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: brown
+LROCKCOL: red
+LFLOORTILE: floor_rough_red
+LROCKTILE: wall_zot_red
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_cocytus
+DESC: Cocytus
+ORDER: 18
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightblue
+LROCKCOL: lightcyan
+LFLOORTILE: floor_frozen
+LROCKTILE: wall_ice
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_tartarus
+DESC: Tartarus
+ORDER: 19
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: magenta
+LROCKCOL: magenta
+LFLOORTILE: floor_black_cobalt
+LROCKTILE: wall_cobalt_rock
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_abyss
+DESC: Abyss
+ORDER: 21
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightgrey
+LROCKCOL: lightred
+LFLOORTILE: floor_nerves_lightgray
+LROCKTILE: wall_abyss_lightred
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_pan
+DESC: Pandemonium
+ORDER: 22
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: red
+LROCKCOL: yellow
+LFLOORTILE: floor_demonic_red
+LROCKTILE: wall_bars_yellow
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_zig
+DESC: Ziggurat
+ORDER: 23
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightgrey
+LROCKCOL: brown
+LFLOORTILE: floor_etched
+LROCKTILE: wall_vault
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_bazaar
+DESC: Bazaar
+ORDER: 24
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: blue
+LROCKCOL: yellow
+LFLOORTILE: floor_vault
+LROCKTILE: wall_vault
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_trove
+DESC: Trove
+ORDER: 25
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: darkgrey
+LROCKCOL: blue
+LFLOORTILE: floor_vault
+LROCKTILE: wall_vault
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_sewer
+DESC: Sewer
+ORDER: 26
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightgrey
+LROCKCOL: blue
+LFLOORTILE: floor_slime
+LROCKTILE: wall_oozing
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_ossuary
+DESC: Ossuary
+ORDER: 27
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: white
+LROCKCOL: yellow
+LFLOORTILE: floor_sandstone
+LROCKTILE: wall_sandstone
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_bailey
+DESC: Bailey
+ORDER: 28
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: white
+LROCKCOL: lightred
+LFLOORTILE: floor_cobble_blood
+LROCKTILE: wall_brick_brown
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_ice_cave
+DESC: Ice Cave
+ORDER: 29
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: blue
+LROCKCOL: white
+LFLOORTILE: floor_ice
+LROCKTILE: wall_ice_block
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_volcano
+DESC: Volcano
+ORDER: 30
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: red
+LROCKCOL: red
+LFLOORTILE: floor_rough_red
+LROCKTILE: wall_volcanic
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_wizlab
+DESC: Wizard's Laboratory
+ORDER: 31
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: magenta
+LROCKCOL: lightmagenta
+LFLOORTILE: floor_mystic_chasm
+LROCKTILE: wall_zot_magenta
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_desolation
+DESC: Desolation of Salt
+ORDER: 32
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightgrey
+LROCKCOL: brown
+LFLOORTILE: floor_salt
+LROCKTILE: wall_desolation
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_gauntlet
+DESC: Gauntlet
+ORDER: 33
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightgrey
+LROCKCOL: brown
+LFLOORTILE: floor_gauntlet
+LROCKTILE: wall_lab_rock
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_arena
+DESC: Arena
+ORDER: 34
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightgrey
+LROCKCOL: cyan
+LFLOORTILE: floor_normal
+LROCKTILE: wall_normal
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_crucible
+DESC: Crucible of Flesh
+ORDER: 35
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: lightred
+LROCKCOL: red
+LFLOORTILE: floor_cage
+LROCKTILE: wall_crucible
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_necropolis
+DESC: Necropolis
+ORDER: 36
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: magenta
+LROCKCOL: lightgrey
+LFLOORTILE: floor_necropolis_squares
+LROCKTILE: wall_catacombs
+MAP
+xxxxxxxxxxxxx
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+x.....@.....x
+x...........x
+x...........x
+x...........x
+x...........x
+x...........x
+xxxxxxxxxxxxx
+ENDMAP
+
+NAME: housing_gulch
+DESC: Gulch
+ORDER: 37
+TAGS: housing housing_start no_monster_gen no_item_gen no_trap_gen no_rotate no_hmirror no_vmirror
+ORIENT: encompass
+KFEAT: @ = runelight
+LFLOORCOL: green
+LROCKCOL: lightblue
+LFLOORTILE: floor_gulch
+LROCKTILE: wall_gulch_brick
 MAP
 xxxxxxxxxxxxx
 x...........x
