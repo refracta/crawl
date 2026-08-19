@@ -15,8 +15,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
+
+#ifndef TARGET_OS_WINDOWS
+#include <sys/stat.h>
+#endif
 
 #include "act-iter.h"
 #include "actor.h"
@@ -35,6 +40,7 @@
 #include "initfile.h"
 #include "mapmark.h"
 #include "macro.h"
+#include "menu.h"
 #include "message.h"
 #include "mgen-data.h"
 #include "monster.h"
@@ -72,6 +78,9 @@ static const char * const HOUSING_SPAWNS_KEY = "housing_spawn_points";
 static const char * const HOUSING_LAST_FEATURE_KEY = "housing_last_feature";
 static const char * const HOUSING_META_CHUNK = "housing_meta";
 static const char * const HOUSING_LEVEL_CHUNK = "level";
+static const char * const HOUSING_INDEX_CHUNK = "housing_index";
+static const char * const HOUSING_MAP_CHUNK_PREFIX = "housing_map_";
+static const char * const HOUSING_TEMPLATE_CHUNK = "housing_template";
 static const char * const HOUSING_PORTAL_TARGET_KEY = "housing_target";
 static const char * const HOUSING_SPAWN_MARKER_KEY = "housing_spawn";
 static const char * const HOUSING_MONSTER_KEY = "housing_created_monster";
@@ -82,6 +91,8 @@ static const int HOUSING_SNAPSHOT_LEGACY_SCHEMA = 1;
 static const int HOUSING_SNAPSHOT_SCHEMA = 2;
 static const int HOUSING_MAX_MONSTERS = 64;
 static const int HOUSING_MAX_SHOPS = 32;
+static const int HOUSING_INDEX_SCHEMA = 1;
+static const int HOUSING_MAX_MAPS = 64;
 static int _housing_turn_origin = -1;
 static bool _housing_runtime_initialized = false;
 static bool _housing_started_as_visitor = false;
@@ -92,11 +103,26 @@ static housing_role_type _housing_runtime_role = housing_role_type::none;
 static package *_housing_owner_save = nullptr;
 static package *_housing_visitor_save = nullptr;
 static package *_housing_restore_save = nullptr;
+// While an owner map is being loaded, `you.save` points at an anonymous
+// staged clone and this keeps the previously committed canonical package.
+// Only a fully loaded map is promoted back into the canonical save.
+static package *_housing_owner_promotion_save = nullptr;
+static package *_housing_staged_owner_save = nullptr;
+// True only when a staged owner restore actually replaces canonical D with a
+// different named map. Returning from a visit to the already-active map must
+// preserve its exact saved position and map-bound character references.
+static bool _housing_owner_map_changed = false;
+// A legacy single-map owner package is staged before housing_finish_map_entry
+// upgrades its floor spawn to an authenticated fixture. Refresh the hidden
+// template from the post-load D during promotion instead of preserving the
+// stale pre-fixture bytes staged for compatibility.
+static bool _housing_owner_template_needs_refresh = false;
 static string _housing_canonical_save_path;
 static bool _housing_skip_next_checkpoint = false;
 static string _housing_current_map_id;
 static string _housing_current_map_owner;
 static string _housing_pending_notice;
+static bool _housing_entry_requires_spawn = false;
 
 static const char * const _visitor_start_failure =
     "The Housing visit could not be started safely.";
@@ -105,6 +131,8 @@ static const char * const _owner_return_failure =
 
 static string _lowercase_ascii(string value);
 static string _getenv_string(const char *name);
+static bool _ensure_owner_map_storage();
+static void _promote_staged_owner_map();
 
 static void _initialize_housing_runtime()
 {
@@ -173,6 +201,136 @@ static bool _is_map_id(const string &value)
     return std::all_of(value.begin(), value.end(), [](unsigned char c) {
         return _is_ascii_alnum(c) || c == '_';
     });
+}
+
+bool housing_valid_map_id(const string &map_id)
+{
+    return _is_map_id(map_id);
+}
+
+string housing_map_chunk_name(const string &map_id)
+{
+    return _is_map_id(map_id) ? HOUSING_MAP_CHUNK_PREFIX + map_id : "";
+}
+
+static void _copy_package_chunk(package &save, const string &source,
+                                const string &destination)
+{
+    if (source.empty() || destination.empty() || source == destination
+        || !save.has_chunk(source))
+    {
+        fail("invalid Housing map chunk copy");
+    }
+
+    vector<char> data;
+    {
+        chunk_reader input(&save, source);
+        input.read_all(data);
+    }
+    if (data.empty())
+        corrupted("Housing map chunk \"%s\" is empty", source.c_str());
+
+    chunk_writer output(&save, destination);
+    output.write(data.data(), data.size());
+}
+
+static bool _package_chunks_equal(package &save, const string &left,
+                                  const string &right)
+{
+    if (!save.has_chunk(left) || !save.has_chunk(right))
+        return false;
+
+    vector<char> left_data;
+    vector<char> right_data;
+    {
+        chunk_reader input(&save, left);
+        input.read_all(left_data);
+    }
+    {
+        chunk_reader input(&save, right);
+        input.read_all(right_data);
+    }
+    return left_data == right_data;
+}
+
+static void _validate_map_index(package &save, const vector<string> &maps,
+                                const string &current_map)
+{
+    if (maps.empty() || maps.size() > HOUSING_MAX_MAPS
+        || !_is_map_id(current_map))
+    {
+        corrupted("Housing map index has invalid bounds");
+    }
+
+    std::set<string> unique_maps;
+    bool has_main = false;
+    bool has_current = false;
+    for (const string &map_id : maps)
+    {
+        const string chunk = housing_map_chunk_name(map_id);
+        if (chunk.empty() || !unique_maps.insert(map_id).second
+            || !save.has_chunk(chunk))
+        {
+            corrupted("Housing map index contains an invalid map");
+        }
+        has_main |= map_id == "main";
+        has_current |= map_id == current_map;
+    }
+    if (!has_main || !has_current)
+        corrupted("Housing map index is missing main or its active map");
+}
+
+bool housing_read_map_index(package &save, vector<string> &maps,
+                            string &current_map)
+{
+    maps.clear();
+    current_map.clear();
+    if (!save.has_chunk(HOUSING_INDEX_CHUNK))
+        return false;
+
+    reader input(&save, HOUSING_INDEX_CHUNK);
+    input.set_safe_read(true);
+    const int schema = unmarshallInt(input);
+    if (schema != HOUSING_INDEX_SCHEMA)
+        corrupted("Housing map index has an unsupported schema");
+
+    current_map = unmarshallString(input);
+    const int count = unmarshallInt(input);
+    if (count < 1 || count > HOUSING_MAX_MAPS)
+        corrupted("Housing map index has an invalid map count");
+    for (int i = 0; i < count; ++i)
+        maps.push_back(unmarshallString(input));
+    input.fail_if_not_eof(HOUSING_INDEX_CHUNK);
+    _validate_map_index(save, maps, current_map);
+    return true;
+}
+
+void housing_write_map_index(package &save, const vector<string> &maps,
+                             const string &current_map)
+{
+    _validate_map_index(save, maps, current_map);
+    writer output(&save, HOUSING_INDEX_CHUNK);
+    marshallInt(output, HOUSING_INDEX_SCHEMA);
+    marshallString(output, current_map);
+    marshallInt(output, maps.size());
+    for (const string &map_id : maps)
+        marshallString(output, map_id);
+}
+
+static bool _is_private_housing_save_chunk(const string &chunk)
+{
+    const string map_prefix = HOUSING_MAP_CHUNK_PREFIX;
+    return chunk == _housing_save_level_chunk()
+        || chunk == HOUSING_INDEX_CHUNK
+        || chunk == HOUSING_TEMPLATE_CHUNK
+        || chunk.compare(0, map_prefix.size(), map_prefix) == 0;
+}
+
+void housing_copy_visitor_state(package &source, package &destination)
+{
+    for (const string &chunk : source.list_chunks())
+        if (!_is_private_housing_save_chunk(chunk))
+            destination.copy_chunk_from(source, chunk, chunk);
 }
 
 static bool _is_account_name(const string &value)
@@ -326,6 +484,55 @@ bool housing_is_visitor()
     return housing_current_role() == housing_role_type::visitor;
 }
 
+const string &housing_current_map_id()
+{
+    _initialize_housing_runtime();
+    return _housing_current_map_id;
+}
+
+static bool _ensure_owner_map_storage()
+{
+    if (!housing_is_owner() || !you.save)
+        return false;
+
+    vector<string> maps;
+    string current_map;
+    if (housing_read_map_index(*you.save, maps, current_map))
+    {
+        if (!you.save->has_chunk(HOUSING_TEMPLATE_CHUNK))
+        {
+            // Saves created before the pristine template was introduced use
+            // their existing main map as the least-surprising safe fallback.
+            _copy_package_chunk(*you.save, housing_map_chunk_name("main"),
+                                HOUSING_TEMPLATE_CHUNK);
+        }
+        _housing_current_map_id = current_map;
+        return true;
+    }
+
+    // Legacy Housing saves have exactly one loader-facing level chunk. Promote
+    // it to the canonical `main` map without regenerating or discarding any
+    // terrain, items, monsters, portals, or spawn metadata.
+    const string level_chunk = _housing_save_level_chunk();
+    if (you.on_current_level)
+    {
+        // Level generation may already have written D before
+        // housing_finish_map_entry() authenticates the visible spawn fixture.
+        // Always refresh the loaded level here so main and the pristine
+        // template include the post-housing_ensure_level() properties/marker.
+        save_level(level_id::current());
+    }
+    else if (!you.save->has_chunk(level_chunk))
+        corrupted("Legacy Housing save is missing its main map");
+    _copy_package_chunk(*you.save, level_chunk,
+                        housing_map_chunk_name("main"));
+    _copy_package_chunk(*you.save, level_chunk, HOUSING_TEMPLATE_CHUNK);
+    maps.push_back("main");
+    housing_write_map_index(*you.save, maps, "main");
+    _housing_current_map_id = "main";
+    return true;
+}
+
 package *housing_open_save_for_restore(const string &filename)
 {
     _initialize_housing_runtime();
@@ -336,7 +543,11 @@ package *housing_open_save_for_restore(const string &filename)
         _housing_restore_save = nullptr;
         if (housing_is_owner())
         {
-            _housing_owner_save = save;
+            // A staged owner-map restore deliberately keeps the canonical
+            // package separate until the replacement level and spawn are
+            // known-good. Otherwise this is an ordinary canonical restart.
+            if (!_housing_owner_promotion_save)
+                _housing_owner_save = save;
             _housing_visitor_save = nullptr;
         }
         else
@@ -401,9 +612,13 @@ package *housing_open_save_for_restore(const string &filename)
         }
 
         // Keep every character/global chunk from this visitor session and
-        // replace only the map. On a visitor->visitor handoff WebTiles reuses
-        // this same disposable save, so HP/inventory/etc. continue; on return
-        // to owner the whole session directory is discarded.
+        // replace only the map. Strip canonical multi-map archives from the
+        // disposable package before its first restore as well as on every
+        // in-process visitor handoff. HP/inventory/etc. remain portable, while
+        // private owner levels are never decompressed into another capsule.
+        for (const string &chunk : save->list_chunks())
+            if (_is_private_housing_save_chunk(chunk))
+                save->delete_chunk(chunk);
         save->copy_chunk_from(snapshot, HOUSING_LEVEL_CHUNK,
                               _housing_save_level_chunk());
         save->commit();
@@ -442,14 +657,11 @@ void housing_normalize_legacy_delver_depth()
     }
 }
 
-void housing_scrub_visitor_transition_state()
+static void _scrub_housing_map_transition_state()
 {
-    if (!housing_is_visitor())
-        return;
-
-    // These references belong to the previous public map, not to the portable
-    // visitor character capsule. This hook runs after TAG_YOU and auxiliary
-    // chunks are restored, but before the replacement level is loaded.
+    // These references belong to the previous map, not to the portable player
+    // state. This hook runs after the outgoing checkpoint and before TAG_LEVEL
+    // replaces the level, for both owner and visitor transitions.
     you.clear_constricted();
     // Do not use clear_beholders() here: it grants a fresh random mesmerise
     // immunity and would mutate otherwise portable visitor state on every hop.
@@ -485,10 +697,34 @@ void housing_scrub_visitor_transition_state()
     the_lost_ones.clear();
     const level_id housing_level(BRANCH_DUNGEON, 1);
     StashTrack.remove_level(housing_level);
+    shopping_list.del_things_from(housing_level);
     travel_cache.erase_level_info(housing_level);
     travel_cache.flush_invalid_waypoints();
     overview_clear();
     you.entering_level = false;
+}
+
+void housing_scrub_visitor_transition_state()
+{
+    // A visitor returning through a staged owner-map package has already
+    // switched roles before TAG_YOU restore, but its map-bound references are
+    // still from the canonical map that preceded the requested target.
+    if (housing_is_visitor()
+        || (_housing_owner_promotion_save && _housing_owner_map_changed))
+        _scrub_housing_map_transition_state();
+}
+
+void housing_prepare_loaded_level()
+{
+    if (!crawl_state.game_is_housing() || !housing_is_visitor())
+        return;
+
+    // Public monsters retain the publisher's MID namespace. Do this at the
+    // common TAG_LEVEL boundary, including the first URL visitor restore, so
+    // no marker/startup hook can allocate a colliding actor id.
+    for (const monster &mons : menv_real)
+        if (mons.alive())
+            you.last_mid = std::max(you.last_mid, mons.mid);
 }
 
 static string _housing_points_path()
@@ -733,15 +969,38 @@ void housing_finish_map_entry()
         return;
 
     housing_ensure_level();
-    if (housing_is_visitor())
+    if (housing_is_owner() && !_ensure_owner_map_storage())
+        fail("The canonical Housing map index is unavailable");
+    if (housing_is_owner()
+        && !_package_chunks_equal(*you.save, _housing_save_level_chunk(),
+                                  housing_map_chunk_name(
+                                      _housing_current_map_id)))
+    {
+        corrupted("The active Housing level does not match its map index");
+    }
+    const bool place_at_spawn = housing_is_visitor()
+                                || _housing_entry_requires_spawn;
+    if (place_at_spawn)
     {
         const vector<coord_def> spawns = _stored_spawns();
         if (spawns.empty())
-            game_ended(game_exit::abort, _visitor_start_failure);
+        {
+            _housing_entry_requires_spawn = false;
+            if (housing_is_visitor())
+                game_ended(game_exit::abort, _visitor_start_failure);
+            fail("The Housing owner map has no valid spawn");
+        }
 
         if (!_move_to_spawn(spawns, true))
-            game_ended(game_exit::abort, _visitor_start_failure);
+        {
+            _housing_entry_requires_spawn = false;
+            if (housing_is_visitor())
+                game_ended(game_exit::abort, _visitor_start_failure);
+            fail("The Housing owner map spawn is blocked");
+        }
     }
+    _housing_entry_requires_spawn = false;
+
     housing_reset_map_turns();
     if (!_housing_pending_notice.empty())
     {
@@ -995,8 +1254,7 @@ static std::unique_ptr<package> _clone_with_snapshot_level(
     package &source, package &snapshot)
 {
     std::unique_ptr<package> clone(new package());
-    for (const string &chunk : source.list_chunks())
-        clone->copy_chunk_from(source, chunk, chunk);
+    housing_copy_visitor_state(source, *clone);
     clone->copy_chunk_from(snapshot, HOUSING_LEVEL_CHUNK,
                            _housing_save_level_chunk());
     clone->commit();
@@ -1013,6 +1271,7 @@ static void _checkpoint_owner_before_visit()
     // establish the exact owner rollback boundary before any map-bound state is
     // cleared or the save sink is swapped.
     save_level(level_id::current());
+    housing_sync_current_map();
     save_game(false);
     you.save->commit();
     housing_publish_current_map();
@@ -1142,10 +1401,214 @@ static bool _apply_canonical_owner_context()
     return true;
 }
 
-static NORETURN void _return_to_owner()
+static std::unique_ptr<package> _stage_owner_map(package &canonical,
+                                                 const string &target_map,
+                                                 string &previous_map,
+                                                 bool &template_needs_refresh)
+{
+    template_needs_refresh = false;
+    if (!_is_map_id(target_map)
+        || !canonical.has_chunk(_housing_save_level_chunk()))
+    {
+        return nullptr;
+    }
+
+    vector<string> maps;
+    string current_map;
+    const bool legacy = !housing_read_map_index(canonical, maps, current_map);
+    if (legacy)
+    {
+        if (target_map != "main")
+            return nullptr;
+        maps.push_back("main");
+        current_map = "main";
+    }
+    if (std::find(maps.begin(), maps.end(), target_map) == maps.end())
+        return nullptr;
+    if (!legacy
+        && !_package_chunks_equal(canonical, _housing_save_level_chunk(),
+                                  housing_map_chunk_name(current_map)))
+    {
+        corrupted("The canonical Housing level does not match its map index");
+    }
+
+    std::unique_ptr<package> staged(new package());
+    for (const string &chunk : canonical.list_chunks())
+        staged->copy_chunk_from(canonical, chunk, chunk);
+    if (legacy)
+    {
+        _copy_package_chunk(*staged, _housing_save_level_chunk(),
+                            housing_map_chunk_name("main"));
+    }
+    if (!staged->has_chunk(HOUSING_TEMPLATE_CHUNK))
+    {
+        _copy_package_chunk(*staged, housing_map_chunk_name("main"),
+                            HOUSING_TEMPLATE_CHUNK);
+    }
+    if (current_map != target_map)
+    {
+        _copy_package_chunk(*staged, housing_map_chunk_name(target_map),
+                            _housing_save_level_chunk());
+    }
+    housing_write_map_index(*staged, maps, target_map);
+    staged->commit();
+    previous_map = current_map;
+    template_needs_refresh = legacy;
+    return staged;
+}
+
+static NORETURN void _restart_canonical_after_owner_transition_failure(
+    package *staged, package *canonical, const string &notice)
+{
+    if (!staged)
+        staged = _housing_staged_owner_save;
+    if (_housing_restore_save == staged)
+        _housing_restore_save = nullptr;
+    if (you.save == staged || you.save == canonical)
+        you.save = nullptr;
+    _housing_staged_owner_save = nullptr;
+    _housing_owner_map_changed = false;
+    _housing_owner_template_needs_refresh = false;
+    if (staged)
+    {
+        staged->abort();
+        delete staged;
+    }
+
+    const string filename = canonical
+                                ? canonical->get_filename()
+                                : _housing_canonical_save_path;
+    if (canonical)
+    {
+        canonical->abort();
+        delete canonical;
+    }
+
+    std::unique_ptr<package> reopened(new package(filename.c_str(), true));
+    vector<string> maps;
+    string current_map;
+    if (!housing_read_map_index(*reopened, maps, current_map))
+        current_map = "main";
+
+    _housing_owner_promotion_save = nullptr;
+    _housing_runtime_role = housing_role_type::owner;
+    _housing_current_map_owner.clear();
+    _housing_current_map_id = current_map;
+    _housing_owner_save = reopened.release();
+    _housing_restore_save = _housing_owner_save;
+    _housing_visitor_save = nullptr;
+    _housing_skip_next_checkpoint = true;
+    _housing_entry_requires_spawn = false;
+    _housing_pending_notice = notice;
+    macro_clear_mappings();
+    game_ended(game_exit::housing_transition);
+}
+
+static void _promote_staged_owner_map()
+{
+    ASSERT(housing_is_owner());
+    ASSERT(_housing_owner_promotion_save);
+    ASSERT(you.save);
+
+    package *staged = you.save;
+    package *canonical = _housing_owner_promotion_save;
+    vector<string> maps;
+    string target_map;
+
+    try
+    {
+        if (!housing_read_map_index(*staged, maps, target_map)
+            || target_map != _housing_current_map_id)
+        {
+            fail("The staged Housing owner map does not match its index");
+        }
+
+        // Promote only after TAG_LEVEL has loaded and a valid spawn was chosen.
+        // D, the named target, housing_index and TAG_YOU then enter the
+        // canonical package in one commit made by save_game(false).
+        you.save = canonical;
+        save_level(level_id::current());
+        if (_housing_owner_template_needs_refresh)
+        {
+            _copy_package_chunk(*canonical, _housing_save_level_chunk(),
+                                HOUSING_TEMPLATE_CHUNK);
+        }
+        else if (!canonical->has_chunk(HOUSING_TEMPLATE_CHUNK))
+        {
+            canonical->copy_chunk_from(*staged, HOUSING_TEMPLATE_CHUNK,
+                                       HOUSING_TEMPLATE_CHUNK);
+        }
+        _copy_package_chunk(*canonical, _housing_save_level_chunk(),
+                            housing_map_chunk_name(target_map));
+        housing_write_map_index(*canonical, maps, target_map);
+        save_game(false);
+        canonical->commit();
+    }
+    catch (const std::exception &error)
+    {
+        dprf("Housing owner map promotion failed: %s", error.what());
+        _restart_canonical_after_owner_transition_failure(
+            staged, canonical,
+            "That Housing map could not be saved safely; the last committed "
+            "owner map was restored.");
+    }
+
+    staged->abort();
+    delete staged;
+    _housing_staged_owner_save = nullptr;
+    _housing_owner_promotion_save = nullptr;
+    _housing_owner_map_changed = false;
+    _housing_owner_template_needs_refresh = false;
+    _housing_owner_save = canonical;
+    you.save = canonical;
+}
+
+bool housing_owner_restore_pending()
+{
+    // The canonical promotion package is the transaction token. In
+    // particular this stays true if generic restore code clears you.save
+    // while reporting a malformed anonymous package.
+    return housing_is_owner() && _housing_owner_promotion_save;
+}
+
+bool housing_owner_restore_is_staged()
+{
+    return housing_owner_restore_pending() && _housing_staged_owner_save;
+}
+
+void housing_complete_staged_owner_restore()
+{
+    if (!housing_owner_restore_is_staged())
+        return;
+
+    // The early load hook already validated the target and placed its spawn.
+    // Promotion waits until startup_step has completed all remaining Lua, rc,
+    // tile, travel and view initialisation.
+    if (_housing_entry_requires_spawn)
+        fail("The staged Housing owner map was not finalised during load");
+    _promote_staged_owner_map();
+}
+
+void housing_rollback_staged_owner_restore()
+{
+    if (!housing_owner_restore_pending())
+        return;
+
+    _housing_entry_requires_spawn = false;
+    _restart_canonical_after_owner_transition_failure(
+        _housing_staged_owner_save, _housing_owner_promotion_save,
+        "That Housing owner map could not be loaded safely; the last "
+        "committed owner state was restored.");
+}
+
+static NORETURN void _return_to_owner(std::unique_ptr<package> staged,
+                                      const string &target_map,
+                                      const string &previous_map,
+                                      bool template_needs_refresh)
 {
     ASSERT(housing_is_visitor());
     ASSERT(_housing_owner_save);
+    ASSERT(staged);
     ASSERT(you.save);
 
     package *visitor = you.save;
@@ -1156,14 +1619,19 @@ static NORETURN void _return_to_owner()
 
     _housing_runtime_role = housing_role_type::owner;
     _housing_current_map_owner.clear();
-    _housing_current_map_id = "main";
-    _housing_restore_save = _housing_owner_save;
-    _housing_skip_next_checkpoint = true;
+    _housing_current_map_id = target_map;
+    _housing_owner_promotion_save = _housing_owner_save;
+    _housing_staged_owner_save = staged.release();
+    _housing_restore_save = _housing_staged_owner_save;
+    _housing_owner_map_changed = target_map != previous_map;
+    _housing_owner_template_needs_refresh = template_needs_refresh;
+    _housing_skip_next_checkpoint = false;
+    _housing_entry_requires_spawn = _housing_owner_map_changed;
     macro_clear_mappings();
     game_ended(game_exit::housing_transition);
 }
 
-bool housing_return_home()
+static bool _return_to_owner_map(const string &target_map)
 {
     if (!housing_is_visitor())
     {
@@ -1173,14 +1641,27 @@ bool housing_return_home()
 
     try
     {
-        if (!_open_detached_owner_save()
-            || !_apply_canonical_owner_context())
+        if (!_open_detached_owner_save())
         {
+            mprf(MSGCH_ERROR, "%s", _owner_return_failure);
+            return false;
+        }
+
+        string previous_map;
+        bool template_needs_refresh;
+        std::unique_ptr<package> staged =
+            _stage_owner_map(*_housing_owner_save, target_map, previous_map,
+                             template_needs_refresh);
+        if (!staged || !_apply_canonical_owner_context())
+        {
+            _housing_owner_save->abort();
             delete _housing_owner_save;
             _housing_owner_save = nullptr;
             mprf(MSGCH_ERROR, "%s", _owner_return_failure);
             return false;
         }
+        _return_to_owner(std::move(staged), target_map, previous_map,
+                         template_needs_refresh);
     }
     catch (const game_ended_condition&)
     {
@@ -1189,13 +1670,388 @@ bool housing_return_home()
     catch (const std::exception &error)
     {
         dprf("Housing owner restore open failed: %s", error.what());
+        if (_housing_owner_save)
+            _housing_owner_save->abort();
         delete _housing_owner_save;
         _housing_owner_save = nullptr;
         mprf(MSGCH_ERROR, "%s", _owner_return_failure);
         return false;
     }
 
-    _return_to_owner();
+    return false;
+}
+
+bool housing_return_home()
+{
+    return _return_to_owner_map("main");
+}
+
+static bool _enter_owner_map(const string &target_map)
+{
+    if (!housing_is_owner() || !you.save || !_is_map_id(target_map))
+        return false;
+    if (!_ensure_owner_map_storage())
+        return false;
+
+    vector<string> maps;
+    string current_map;
+    if (!housing_read_map_index(*you.save, maps, current_map)
+        || std::find(maps.begin(), maps.end(), target_map) == maps.end())
+    {
+        mpr("That Housing map does not exist.");
+        return false;
+    }
+    if (current_map == target_map)
+    {
+        mprf("You are already on Housing map '%s'.", target_map.c_str());
+        return false;
+    }
+
+    package *canonical = you.save;
+    package *staged_save = nullptr;
+    try
+    {
+        _checkpoint_owner_before_visit();
+
+        string previous_map;
+        bool template_needs_refresh;
+        std::unique_ptr<package> staged =
+            _stage_owner_map(*canonical, target_map, previous_map,
+                             template_needs_refresh);
+        if (!staged || previous_map != current_map)
+            fail("The Housing map changed while staging its transition");
+
+        staged_save = staged.release();
+        you.save = staged_save;
+        _housing_owner_save = canonical;
+        _housing_owner_promotion_save = canonical;
+        _housing_staged_owner_save = staged_save;
+        _housing_owner_map_changed = true;
+        _housing_owner_template_needs_refresh = template_needs_refresh;
+        _housing_current_map_id = target_map;
+        _housing_entry_requires_spawn = true;
+
+        stop_delay(true, true);
+        heal_flayed_effect(&you, true, true);
+        clear_level_bound_player_state(true);
+        _scrub_housing_map_transition_state();
+        drop_pending_monster_resets();
+        crawl_state.potential_pursuers.clear();
+        const level_id old_level = level_id::current();
+        you.position.reset();
+        load_level(DNGN_UNSEEN, LOAD_HOUSING_REPLACE, old_level);
+
+        // LOAD_HOUSING_REPLACE has now completed every marker, travel and tile
+        // hook. Promote the staged map only after that full boundary succeeds.
+        _promote_staged_owner_map();
+    }
+    catch (const game_ended_condition&)
+    {
+        if (housing_owner_restore_is_staged())
+            housing_rollback_staged_owner_restore();
+        throw;
+    }
+    catch (const std::exception &error)
+    {
+        dprf("Housing owner map transition failed: %s", error.what());
+        _housing_entry_requires_spawn = false;
+        _restart_canonical_after_owner_transition_failure(
+            staged_save, canonical,
+            "That Housing map could not be loaded safely; the previous owner "
+            "map was restored.");
+    }
+
+    crawl_state.need_save = true;
+    you.turn_is_over = false;
+    housing_publish_current_map();
+    mprf("You enter %s:%s.", you.your_name.c_str(), target_map.c_str());
+    return true;
+}
+
+static bool _create_owner_map(const string &map_id)
+{
+    if (!_is_map_id(map_id))
+    {
+        mpr("Map ids use 1-20 ASCII letters, digits, or underscores.");
+        return false;
+    }
+    if (!housing_authorize_action("create a map", 0)
+        || !_ensure_owner_map_storage())
+    {
+        return false;
+    }
+
+    vector<string> maps;
+    string current_map;
+    if (!housing_read_map_index(*you.save, maps, current_map))
+        fail("The canonical Housing map index disappeared");
+    if (std::find(maps.begin(), maps.end(), map_id) != maps.end())
+    {
+        mpr("A Housing map with that id already exists.");
+        return false;
+    }
+    if (maps.size() >= HOUSING_MAX_MAPS)
+    {
+        mprf("You can keep at most %d Housing maps.", HOUSING_MAX_MAPS);
+        return false;
+    }
+    if (!you.save->has_chunk(HOUSING_TEMPLATE_CHUNK))
+        fail("The canonical Housing map template is missing");
+
+    _copy_package_chunk(*you.save, HOUSING_TEMPLATE_CHUNK,
+                        housing_map_chunk_name(map_id));
+    maps.push_back(map_id);
+    housing_write_map_index(*you.save, maps, current_map);
+    you.save->commit();
+    mprf("Created Housing map '%s'. Enter it once before other players can "
+         "visit it.", map_id.c_str());
+    return true;
+}
+
+static bool _unlink_public_map_file(const string &path,
+                                    const string &public_dir)
+{
+    // Resolve the containing directory rather than the entry itself: realpath
+    // on a missing or dangling entry cannot distinguish ENOENT from failures
+    // such as EACCES/ENOTDIR. Once the parent is proven inside the public tree,
+    // unlinking the exact basename is safe even when that entry is a symlink.
+    const string parent = _path_without_trailing_separators(
+        get_parent_directory(path));
+    if (parent.empty())
+        return false;
+#ifndef TARGET_OS_WINDOWS
+    struct stat parent_info;
+    errno = 0;
+    if (lstat(parent.c_str(), &parent_info) != 0)
+    {
+        // A map that has never been published may have no account/name
+        // directories yet. That is a genuine idempotent absence; every other
+        // lookup error is retained as a fail-closed deletion failure.
+        return errno == ENOENT;
+    }
+#else
+    return false;
+#endif
+    if (!_path_is_within(parent, public_dir))
+        return false;
+    errno = 0;
+    if (unlink_u(path.c_str()) == 0)
+        return true;
+    return errno == ENOENT;
+}
+
+bool housing_unpublish_map_files(const string &public_dir,
+                                 const string &account_id,
+                                 const string &owner_name,
+                                 const string &map_id)
+{
+    if (public_dir.empty() || !_is_decimal_id(account_id)
+        || !_is_account_name(owner_name) || !_is_map_id(map_id))
+    {
+        return false;
+    }
+
+    const string account_path =
+        catpath(catpath(public_dir, account_id), map_id + ".hmap");
+    const string by_name_path =
+        catpath(catpath(catpath(public_dir, "by-name"),
+                        _lowercase_ascii(owner_name)), map_id + ".hmap");
+    // Remove both externally visitable aliases before canonical deletion. If
+    // either exact unlink fails, retain the canonical map so no stale public
+    // snapshot can outlive a successfully deleted owner map.
+    const bool account_removed =
+        _unlink_public_map_file(account_path, public_dir);
+    const bool name_removed =
+        _unlink_public_map_file(by_name_path, public_dir);
+    return account_removed && name_removed;
+}
+
+static bool _unpublish_owner_map(const string &map_id)
+{
+    const string public_dir = _getenv_string("CRAWL_HOUSING_PUBLIC_DIR");
+    if (public_dir.empty())
+        return true;
+
+    return housing_unpublish_map_files(
+        public_dir, _getenv_string("CRAWL_HOUSING_ACCOUNT_ID"),
+        you.your_name, map_id);
+}
+
+static bool _delete_owner_map(const string &map_id)
+{
+    if (map_id == "main")
+    {
+        mpr("The main Housing map cannot be deleted.");
+        return false;
+    }
+    if (!_is_map_id(map_id)
+        || !housing_authorize_action("delete a map", 0)
+        || !_ensure_owner_map_storage())
+    {
+        return false;
+    }
+
+    vector<string> maps;
+    string current_map;
+    if (!housing_read_map_index(*you.save, maps, current_map))
+        fail("The canonical Housing map index disappeared");
+    auto found = std::find(maps.begin(), maps.end(), map_id);
+    if (found == maps.end())
+    {
+        mpr("That Housing map no longer exists.");
+        return false;
+    }
+
+    if (current_map == map_id && !_enter_owner_map("main"))
+        return false;
+
+    // _enter_owner_map may have swapped packages and invalidated the old index
+    // vector's relationship to the canonical directory; reload it.
+    maps.clear();
+    current_map.clear();
+    if (!housing_read_map_index(*you.save, maps, current_map))
+        fail("The canonical Housing map index disappeared");
+    found = std::find(maps.begin(), maps.end(), map_id);
+    if (found == maps.end() || current_map == map_id)
+        fail("The Housing map could not be made inactive for deletion");
+
+    if (!_unpublish_owner_map(map_id))
+    {
+        mprf(MSGCH_ERROR,
+             "The public Housing snapshot could not be removed; the map was "
+             "kept. It is safe to retry deletion.");
+        return false;
+    }
+
+    you.save->delete_chunk(housing_map_chunk_name(map_id));
+    maps.erase(found);
+    housing_write_map_index(*you.save, maps, current_map);
+    you.save->commit();
+    mprf("Deleted Housing map '%s'.", map_id.c_str());
+    return true;
+}
+
+static string _select_housing_map(const vector<string> &maps,
+                                  const string &current_map)
+{
+    Menu menu(MF_SINGLESELECT | MF_ARROWS_SELECT | MF_INIT_HOVER
+              | MF_ALLOW_FORMATTING);
+    menu.set_title(new MenuEntry("Housing maps", MEL_TITLE));
+    menu.set_more("Select a map, or press <w>+</w> to create one.");
+
+    vector<string> values;
+    values.reserve(maps.size() + 1);
+    values.push_back("\1create");
+    auto *create = new MenuEntry("Create a new map", MEL_ITEM, 1, '+');
+    create->data = &values.back();
+    menu.add_entry(create);
+
+    menu_letter hotkey('a');
+    for (const string &map_id : maps)
+    {
+        values.push_back(map_id);
+        string label = map_id;
+        if (map_id == current_map)
+            label += "  <lightgreen>[current]</lightgreen>";
+        if (map_id == "main")
+            label += "  <darkgrey>[protected]</darkgrey>";
+        const int map_hotkey = values.size() <= 53
+                                   ? static_cast<char>(hotkey++) : 0;
+        auto *entry = new MenuEntry(label, MEL_ITEM, 1, map_hotkey);
+        entry->data = &values.back();
+        menu.add_entry(entry);
+    }
+
+    const vector<MenuEntry*> selected = menu.show();
+    return selected.empty() ? "" : *static_cast<string*>(selected[0]->data);
+}
+
+static char _select_housing_map_action(const string &map_id,
+                                       bool is_current)
+{
+    Menu menu(MF_SINGLESELECT | MF_ARROWS_SELECT | MF_INIT_HOVER);
+    menu.set_title(new MenuEntry("Housing map: " + map_id, MEL_TITLE));
+
+    char actions[2] = { 'e', 'd' };
+    auto *enter = new MenuEntry(is_current ? "Already on this map"
+                                           : "Enter this map",
+                                MEL_ITEM, 1, 'e');
+    enter->data = &actions[0];
+    enter->set_enabled(!is_current);
+    menu.add_entry(enter);
+
+    auto *remove = new MenuEntry(map_id == "main" ? "Delete (main is protected)"
+                                                   : "Delete this map",
+                                 MEL_ITEM, 1, 'd');
+    remove->data = &actions[1];
+    remove->set_enabled(map_id != "main");
+    menu.add_entry(remove);
+
+    const vector<MenuEntry*> selected = menu.show();
+    return selected.empty() ? 0 : *static_cast<char*>(selected[0]->data);
+}
+
+bool housing_manage_maps()
+{
+    if (!housing_is_owner())
+    {
+        mpr("Only the owner can manage Housing maps.");
+        return false;
+    }
+
+    package *canonical = you.save;
+    try
+    {
+        if (!_ensure_owner_map_storage())
+            return false;
+
+        vector<string> maps;
+        string current_map;
+        if (!housing_read_map_index(*you.save, maps, current_map))
+            fail("The canonical Housing map index disappeared");
+
+        const string selected = _select_housing_map(maps, current_map);
+        if (selected.empty())
+            return false;
+        if (selected == "\1create")
+        {
+            char map_id[32] = "";
+            if (msgwin_get_line("New map id (1-20 ASCII letters, digits, _): ",
+                                map_id, sizeof(map_id))
+                || !map_id[0])
+            {
+                canned_msg(MSG_OK);
+                return false;
+            }
+            return _create_owner_map(map_id);
+        }
+
+        const char action = _select_housing_map_action(
+            selected, selected == current_map);
+        if (action == 'e')
+            return _enter_owner_map(selected);
+        if (action != 'd')
+            return false;
+        if (!yesno(make_stringf("Really delete Housing map '%s'?",
+                                selected.c_str()).c_str(), false, 'n'))
+        {
+            canned_msg(MSG_OK);
+            return false;
+        }
+        return _delete_owner_map(selected);
+    }
+    catch (const game_ended_condition&)
+    {
+        throw;
+    }
+    catch (const std::exception &error)
+    {
+        dprf("Housing map management failed: %s", error.what());
+        _restart_canonical_after_owner_transition_failure(
+            nullptr, canonical,
+            "Housing map management failed safely; the last committed owner "
+            "state was restored.");
+    }
 }
 
 static void _replace_with_visitor_map(std::unique_ptr<package> replacement,
@@ -1238,12 +2094,6 @@ static void _replace_with_visitor_map(std::unique_ptr<package> replacement,
         const level_id old_level = level_id::current();
         you.position.reset();
         load_level(DNGN_UNSEEN, LOAD_HOUSING_REPLACE, old_level);
-        // Imported monsters carry the target owner's MIDs, while the portable
-        // visitor character carries its own allocation counter. Advance the
-        // high-water mark before any new actor can be created on this map.
-        for (const monster &mons : menv_real)
-            if (mons.alive())
-                you.last_mid = std::max(you.last_mid, mons.mid);
     }
     catch (...)
     {
@@ -1286,43 +2136,27 @@ static void _replace_with_visitor_map(std::unique_ptr<package> replacement,
     mprf("You enter %s:%s.", owner.c_str(), map_id.c_str());
 }
 
-bool housing_take_portal(const coord_def &pos)
+bool housing_travel_to_target(const string &target)
 {
-    if (!crawl_state.game_is_housing()
-        || !map_bounds(pos) || env.grid(pos) != DNGN_ENTER_PORTAL_VAULT)
+    if (!crawl_state.game_is_housing() || !housing_valid_map_target(target))
     {
+        mpr("Use an account:map identifier (ASCII letters, digits, and _).");
         return false;
-    }
-
-    string target;
-    if (!_portal_target_at(pos, &target))
-    {
-        mprf(MSGCH_ERROR,
-             "This Housing portal is malformed and cannot be used.");
-        return true;
     }
 
     string owner;
     string map_id;
     if (!_split_map_target(target, owner, map_id))
-        return true;
+        return false;
 
-    // A portal bearing our authenticated character name is the rollback edge
-    // from disposable visitor state to the canonical owner checkpoint.
+    // A portal bearing our authenticated character name enters that canonical
+    // owner map. From a visitor session this first restores the last committed
+    // owner character; from another owner map it is an in-process level swap.
     if (_lowercase_ascii(owner) == _lowercase_ascii(you.your_name))
     {
-        if (map_id != "main")
-        {
-            mpr("Only the main owner map is available at present.");
-            return true;
-        }
         if (housing_is_owner())
-        {
-            mpr("You are already on your main Housing map.");
-            return true;
-        }
-        housing_return_home();
-        return true;
+            return _enter_owner_map(map_id);
+        return _return_to_owner_map(map_id);
     }
 
     try
@@ -1333,7 +2167,7 @@ bool housing_take_portal(const coord_def &pos)
         if (!snapshot)
         {
             mprf(MSGCH_ERROR, "That Housing map is unavailable.");
-            return true;
+            return false;
         }
 
         const string own_account_id =
@@ -1342,7 +2176,7 @@ bool housing_take_portal(const coord_def &pos)
             || meta.account_id == own_account_id)
         {
             mprf(MSGCH_ERROR, "That Housing map cannot be visited this way.");
-            return true;
+            return false;
         }
 
         if (housing_is_owner())
@@ -1368,7 +2202,30 @@ bool housing_take_portal(const coord_def &pos)
     {
         dprf("Housing map transition failed: %s", error.what());
         mprf(MSGCH_ERROR, "That Housing map is unavailable.");
+        return false;
     }
+    return true;
+}
+
+bool housing_take_portal(const coord_def &pos)
+{
+    if (!crawl_state.game_is_housing()
+        || !map_bounds(pos) || env.grid(pos) != DNGN_ENTER_PORTAL_VAULT)
+    {
+        return false;
+    }
+
+    string target;
+    if (!_portal_target_at(pos, &target))
+    {
+        mprf(MSGCH_ERROR,
+             "This Housing portal is malformed and cannot be used.");
+        return true;
+    }
+
+    // Returning true means the terrain was handled, even if its destination
+    // was unavailable; callers must not fall through to ordinary portal code.
+    housing_travel_to_target(target);
     return true;
 }
 
@@ -1507,6 +2364,28 @@ static bool _current_map_can_be_published()
     return true;
 }
 
+void housing_sync_current_map()
+{
+    const string expected_map = _housing_current_map_id;
+    if (!_ensure_owner_map_storage())
+        fail("The canonical Housing map index is unavailable");
+
+    vector<string> maps;
+    string current_map;
+    if (!housing_read_map_index(*you.save, maps, current_map))
+        fail("The canonical Housing map index disappeared");
+    if ((!expected_map.empty() && current_map != expected_map)
+        || current_map != _housing_current_map_id
+        || !you.save->has_chunk(_housing_save_level_chunk()))
+    {
+        fail("The active Housing map does not match its canonical index");
+    }
+
+    _copy_package_chunk(*you.save, _housing_save_level_chunk(),
+                        housing_map_chunk_name(current_map));
+    housing_write_map_index(*you.save, maps, current_map);
+}
+
 static void _write_public_snapshot(const string &final_path,
                                    const string &account_id,
                                    const string &map_id)
@@ -1543,9 +2422,7 @@ void housing_publish_current_map()
         return;
 
     const string account_id = _getenv_string("CRAWL_HOUSING_ACCOUNT_ID");
-    const string map_id = _getenv_string("CRAWL_HOUSING_MAP_ID").empty()
-                            ? "main"
-                            : _getenv_string("CRAWL_HOUSING_MAP_ID");
+    const string map_id = housing_current_map_id();
     string public_dir = _getenv_string("CRAWL_HOUSING_PUBLIC_DIR");
     if (public_dir.empty())
         return; // Console development without a WebTiles account binding.
@@ -1622,6 +2499,7 @@ void housing_checkpoint()
     }
 
     save_level(level_id::current());
+    housing_sync_current_map();
     save_game(false);
     // save_game(false) honours DIS_SAVE_CHECKPOINTS. Publication must not:
     // the canonical character+level generation always precedes its snapshot.

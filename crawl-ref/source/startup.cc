@@ -18,6 +18,7 @@
 #include "dbg-objstat.h"
 #include "dungeon.h"
 #include "end.h"
+#include "errors.h"
 #include "exclude.h"
 #include "files.h"
 #include "god-abil.h"
@@ -1107,35 +1108,64 @@ bool startup_step()
     if (choice.filename.empty() && !choice.name.empty())
         choice.filename = get_save_filename(choice.name);
 
-    // A visitor session is meaningful only as a disposable clone of an
-    // existing Housing character. Never fall through to character creation if
-    // the server-side session preparation failed or the clone is missing.
-    if (housing_is_visitor() && !save_exists(choice.filename))
+    try
     {
-        game_ended(game_exit::abort,
-                   "Create a Housing character before visiting a map.");
-    }
+        if (housing_owner_restore_pending())
+        {
+            // The staged anonymous package is supplied by the Housing restore
+            // hook. Never consult canonical file existence or enter chargen.
+            if (!restore_game(choice.filename))
+                fail("The staged Housing owner restore was rejected");
+            save_player_name();
+        }
+        else
+        {
+            // A visitor session is meaningful only as a disposable clone of an
+            // existing Housing character. Never fall through to character
+            // creation if server-side session preparation failed.
+            if (housing_is_visitor() && !save_exists(choice.filename))
+            {
+                game_ended(game_exit::abort,
+                           "Create a Housing character before visiting a map.");
+            }
 
-    if (save_exists(choice.filename) && restore_game(choice.filename))
-        save_player_name();
-    else if (choose_game(ng, choice, defaults)
-             && restore_game(ng.filename))
-    {
-        save_player_name();
-    }
-    else
-    {
-        clear_message_store();
-        setup_game(ng);
-        newchar = true;
-        choice.seed = Options.seed; // kind of ugly, but may be changed during
-                                    // setup_game.
-        write_newgame_options_file(choice);
-    }
-    if (Options.remember_name)
-        crawl_state.default_startup_name = you.your_name;
+            if (save_exists(choice.filename) && restore_game(choice.filename))
+                save_player_name();
+            else if (choose_game(ng, choice, defaults)
+                     && restore_game(ng.filename))
+            {
+                save_player_name();
+            }
+            else
+            {
+                clear_message_store();
+                setup_game(ng);
+                newchar = true;
+                choice.seed = Options.seed; // may be changed during setup_game.
+                write_newgame_options_file(choice);
+            }
+        }
+        if (Options.remember_name)
+            crawl_state.default_startup_name = you.your_name;
 
-    _post_init(newchar);
+        _post_init(newchar);
+        // A visitor returning to an owner map restores through an anonymous
+        // target-map package. Promote only after all startup Lua, rc, tile,
+        // travel and view initialisation has succeeded.
+        housing_complete_staged_owner_restore();
+    }
+    catch (const game_ended_condition&)
+    {
+        if (housing_owner_restore_pending())
+            housing_rollback_staged_owner_restore();
+        throw;
+    }
+    catch (...)
+    {
+        if (housing_owner_restore_pending())
+            housing_rollback_staged_owner_restore();
+        throw;
+    }
 
     return newchar;
 }

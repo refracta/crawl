@@ -770,9 +770,13 @@ static vector<ability_def> &_get_ability_list()
             abflag::instant | abflag::target },
         { ABIL_HOUSING_RETURN_HOME, "Return home",
             0, 0, 0, -1, {}, abflag::instant },
+        { ABIL_HOUSING_MANAGE_MAPS, "Manage housing maps",
+            0, 0, 0, -1, {}, abflag::instant },
         { ABIL_HOUSING_CREATE_MONSTER, "Create a housing monster",
             0, 0, 0, -1, {}, abflag::instant },
         { ABIL_HOUSING_CALL_MERCHANT, "Call a housing merchant",
+            0, 0, 0, -1, {}, abflag::instant },
+        { ABIL_HOUSING_TRAVEL_TO_MAP, "Travel to a housing map",
             0, 0, 0, -1, {}, abflag::instant },
 #ifdef WIZARD
         { ABIL_WIZ_BUILD_TERRAIN, "Build terrain",
@@ -1850,6 +1854,11 @@ static bool _check_ability_possible(const ability_def& abil, bool quiet = false)
                     mpr("Only a visitor can return home this way.");
                 return false;
             }
+        }
+        else if (abil.ability == ABIL_HOUSING_TRAVEL_TO_MAP)
+        {
+            if (!housing_is_owner() && !housing_is_visitor())
+                return false;
         }
         else
         {
@@ -4273,6 +4282,9 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
             return spret::abort;
         return spret::success;
 
+    case ABIL_HOUSING_MANAGE_MAPS:
+        return housing_manage_maps() ? spret::success : spret::abort;
+
     case ABIL_HOUSING_CREATE_MONSTER:
         if (!housing_authorize_action("create a monster", 0)
             || !housing_create_monster())
@@ -4290,6 +4302,20 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
         }
         housing_checkpoint();
         return spret::success;
+
+    case ABIL_HOUSING_TRAVEL_TO_MAP:
+    {
+        char destination[64] = "";
+        if (msgwin_get_line("Housing destination (account:map): ",
+                            destination, sizeof(destination))
+            || !destination[0])
+        {
+            canned_msg(MSG_OK);
+            return spret::abort;
+        }
+        return housing_travel_to_target(destination) ? spret::success
+                                                     : spret::abort;
+    }
 
 #ifdef WIZARD
     case ABIL_WIZ_BUILD_TERRAIN:
@@ -4533,6 +4559,8 @@ bool player_has_ability(ability_type abil, bool include_unusable)
     {
         if (abil == ABIL_HOUSING_RETURN_HOME)
             return housing_is_visitor();
+        if (abil == ABIL_HOUSING_TRAVEL_TO_MAP)
+            return housing_is_owner() || housing_is_visitor();
 #ifndef WIZARD
         if (abil == ABIL_HOUSING_BUILD_TERRAIN
             || abil == ABIL_HOUSING_SET_TERRAIN
@@ -4699,8 +4727,10 @@ vector<talent> your_talents(bool include_unusable, bool ignore_piety)
             ABIL_HOUSING_CLEAR_TERRAIN,
             ABIL_HOUSING_CREATE_PORTAL,
             ABIL_HOUSING_RETURN_HOME,
+            ABIL_HOUSING_MANAGE_MAPS,
             ABIL_HOUSING_CREATE_MONSTER,
             ABIL_HOUSING_CALL_MERCHANT,
+            ABIL_HOUSING_TRAVEL_TO_MAP,
             ABIL_EVOKE_BLINK,
             ABIL_EVOKE_TURN_INVISIBLE,
             ABIL_EVOKE_DISPATER,
@@ -4940,6 +4970,14 @@ int find_ability_slot(const ability_type abil, char firstletter)
     case ABIL_HOUSING_CREATE_MONSTER:
     case ABIL_HOUSING_CALL_MERCHANT:
         first_slot = letter_to_index('H');
+        break;
+
+    case ABIL_HOUSING_MANAGE_MAPS:
+        first_slot = letter_to_index('M');
+        break;
+
+    case ABIL_HOUSING_TRAVEL_TO_MAP:
+        first_slot = letter_to_index('T');
         break;
 
 #ifdef WIZARD

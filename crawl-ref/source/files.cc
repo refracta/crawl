@@ -2235,6 +2235,7 @@ bool load_level(dungeon_feature_type stair_taken, load_mode_type load_mode,
 
         dprf("Loading old level '%s'.", level_name.c_str());
         _restore_tagged_chunk(you.save, level_name, TAG_LEVEL, "Level file is invalid.");
+        housing_prepare_loaded_level();
         if (load_mode != LOAD_VISITOR)
             you.on_current_level = true;
         _redraw_all(); // TODO why is there a redraw call here?
@@ -2254,7 +2255,8 @@ bool load_level(dungeon_feature_type stair_taken, load_mode_type load_mode,
     // has no meaning. Place the visitor before marker activation, travel/tile
     // initialisation, DET_ENTERED_LEVEL, and the first redraw; observers never
     // see a transient player position from the previous map.
-    if (load_mode == LOAD_HOUSING_REPLACE)
+    if (load_mode == LOAD_HOUSING_REPLACE
+        || housing_owner_restore_is_staged())
         housing_finish_map_entry();
 
     if (load_mode != LOAD_VISITOR)
@@ -2647,6 +2649,12 @@ static void _save_game_exit()
     if (!you.entering_level)
         save_level(level_id::current());
 
+    // A Housing canonical save keeps the active level in both Crawl's normal
+    // loader chunk and its named map chunk. Stage the mirror and index before
+    // the commit below so D, TAG_YOU and housing_index are crash-consistent.
+    if (crawl_state.game_is_housing() && housing_is_owner())
+        housing_sync_current_map();
+
     // Publish only after the canonical character and level chunks share one
     // committed generation. A crash before the subsequent atomic rename can
     // leave the previous public snapshot stale, but never half-written or
@@ -2707,7 +2715,11 @@ void save_game(bool leave_game, const char *farewellmsg)
         if (crawl_state.unsaved_macros)
             macro_save();
         if (!you.entering_level)
+        {
             save_level(level_id::current());
+            if (crawl_state.game_is_housing() && housing_is_owner())
+                housing_sync_current_map();
+        }
 #endif
         if (!crawl_state.disables[DIS_SAVE_CHECKPOINTS])
         {
@@ -3255,6 +3267,8 @@ static bool _restore_game(const string& filename)
     player_save_info save_info = _read_character_info(you.save);
     if (!save_info.save_loadable)
     {
+        if (housing_owner_restore_pending())
+            fail("The staged Housing owner character is incompatible");
         // Note: if we are here, the save info was properly read, it would
         // raise an exception otherwise.
         if (yesno(("There is an existing game for name '" + save_info.name +
@@ -3282,6 +3296,8 @@ static bool _restore_game(const string& filename)
     if (!crawl_state.bypassed_startup_menu
         && menu_game_type != crawl_state.type)
     {
+        if (housing_owner_restore_pending())
+            fail("The staged Housing owner game type changed");
         auto atype = article_a(_type_name_processed(save_info.saved_game_type));
         if (!yesno(("You already have " + atype +
                     " game saved under the name '" + save_info.name + "';\n"
@@ -3303,6 +3319,8 @@ static bool _restore_game(const string& filename)
     if (numcmp(save_info.prev_save_version.c_str(), Version::Long, 2) == -1
         && version_is_stable(save_info.prev_save_version.c_str()))
     {
+        if (housing_owner_restore_pending())
+            fail("The staged Housing owner save requires a version prompt");
         if (!yesno(("This game comes from a previous release of Crawl (" +
                     save_info.prev_save_version + ").\n\nIf you load it now,"
                     " you won't be able to go back. Continue?").c_str(),
@@ -3405,6 +3423,11 @@ bool restore_game(const string& filename)
     }
     catch (corrupted_save &err)
     {
+        // A visitor -> owner transition is restoring an anonymous staged clone,
+        // never the canonical save. Let startup's transaction guard roll it
+        // back; do not offer to delete it or fall through to character creation.
+        if (housing_owner_restore_pending())
+            throw;
         if (yesno(make_stringf(
                    "There exists a save by that name but it appears to be invalid.\n"
                    "Do you want to delete it?\n"

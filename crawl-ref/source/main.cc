@@ -2732,6 +2732,8 @@ void world_reacts()
             // Resting makes the saving quite random, but meh.
             crawl_state.save_after_turn = false;
             save_level(level_id::current());
+            if (crawl_state.game_is_housing() && housing_is_owner())
+                housing_sync_current_map();
             save_game(false);
         }
     }
