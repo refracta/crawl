@@ -99,7 +99,11 @@ static const int HOUSING_SNAPSHOT_LEGACY_SCHEMA = 1;
 // shops. Schema 3 adds visitor-only wall markers; older cores must reject
 // these snapshots rather than loading their owner-containment walls intact.
 static const int HOUSING_SNAPSHOT_WORLD_SCHEMA = 2;
-static const int HOUSING_SNAPSHOT_SCHEMA = 3;
+static const int HOUSING_SNAPSHOT_WALL_SCHEMA = 3;
+// Schema 4 renders owner-only barriers as translucent permarock. Readers keep
+// accepting schema-3 metal barriers so existing homes can migrate them, while
+// older cores reject newly published translucent barriers before loading.
+static const int HOUSING_SNAPSHOT_SCHEMA = 4;
 static const int HOUSING_MAX_MONSTERS = 64;
 static const int HOUSING_MAX_SHOPS = 32;
 static const int HOUSING_INDEX_SCHEMA = 1;
@@ -267,6 +271,8 @@ static const char * const _owner_return_failure =
 static string _lowercase_ascii(string value);
 static string _getenv_string(const char *name);
 static bool _ensure_owner_map_storage();
+static bool _housing_shop_can_be_published(const coord_def &pos);
+static bool _current_visitor_wall_marker_at(const coord_def &pos);
 static void _promote_staged_owner_map(bool exact_rollback = false,
                                       int rollback_turn_origin = -1);
 static void _open_visitor_only_walls();
@@ -703,6 +709,7 @@ static bool _supported_snapshot_schema(int schema)
 {
     return schema == HOUSING_SNAPSHOT_LEGACY_SCHEMA
            || schema == HOUSING_SNAPSHOT_WORLD_SCHEMA
+           || schema == HOUSING_SNAPSHOT_WALL_SCHEMA
            || schema == HOUSING_SNAPSHOT_SCHEMA;
 }
 
@@ -719,8 +726,18 @@ bool housing_snapshot_schema_supported(int schema)
 static void _write_snapshot_meta(package &snapshot, const string &account_id,
                                  const string &map_id)
 {
+    // Keep barrier-free maps readable by already-running schema-3 processes
+    // during a rolling deployment. Only a map which actually contains the new
+    // translucent owner-only fixture needs schema 4's fail-closed gate.
+    int schema = HOUSING_SNAPSHOT_WALL_SCHEMA;
+    for (map_marker *marker : env.markers.get_all())
+        if (_current_visitor_wall_marker_at(marker->pos))
+        {
+            schema = HOUSING_SNAPSHOT_SCHEMA;
+            break;
+        }
     writer output(&snapshot, HOUSING_META_CHUNK);
-    marshallInt(output, HOUSING_SNAPSHOT_SCHEMA);
+    marshallInt(output, schema);
     marshallString(output, Version::Long);
     marshallString(output, account_id);
     marshallString(output, you.your_name);
@@ -757,6 +774,15 @@ bool housing_is_owner()
 bool housing_is_visitor()
 {
     return housing_current_role() == housing_role_type::visitor;
+}
+
+void housing_enforce_explore_mode()
+{
+    if (!crawl_state.game_is_housing())
+        return;
+
+    Options.explore_mode = WIZ_NEVER;
+    you.explore = false;
 }
 
 const string &housing_current_map_id()
@@ -1024,6 +1050,12 @@ void housing_prepare_map_transition_restore(bool known_map_change)
 
 void housing_prepare_loaded_level()
 {
+    // Clear optional-death exploration at the TAG_LEVEL boundary, before
+    // generic level rescue, marker activation, and redraw. Normal owner
+    // restores do not use the early map-entry hook below, so an old save must
+    // be sanitised here as well as after rc options are reread during startup.
+    housing_enforce_explore_mode();
+
     if (!crawl_state.game_is_housing() || !housing_is_visitor())
         return;
 
@@ -1132,9 +1164,17 @@ static bool _spawn_marker_at(const coord_def &pos)
         && markers.front()->property("veto_destroy") == "veto";
 }
 
+static bool _visitor_wall_feature(dungeon_feature_type feat)
+{
+    // Metal is the deployed schema-3 representation. Accept it only for
+    // backwards compatibility; owner loads upgrade it to translucent
+    // permarock and all new barriers use the latter directly.
+    return feat == DNGN_CLEAR_PERMAROCK_WALL || feat == DNGN_METAL_WALL;
+}
+
 static bool _visitor_wall_marker_at(const coord_def &pos)
 {
-    if (!map_bounds(pos) || env.grid(pos) != DNGN_METAL_WALL)
+    if (!map_bounds(pos) || !_visitor_wall_feature(env.grid(pos)))
         return false;
     const vector<map_marker*> markers = env.markers.get_markers_at(pos);
     return markers.size() == 1
@@ -1143,6 +1183,12 @@ static bool _visitor_wall_marker_at(const coord_def &pos)
         && markers.front()->property(HOUSING_SPAWN_MARKER_KEY).empty()
         && markers.front()->property(HOUSING_PORTAL_TARGET_KEY).empty()
         && markers.front()->property("veto_destroy") == "veto";
+}
+
+static bool _current_visitor_wall_marker_at(const coord_def &pos)
+{
+    return map_bounds(pos) && env.grid(pos) == DNGN_CLEAR_PERMAROCK_WALL
+           && _visitor_wall_marker_at(pos);
 }
 
 bool housing_visitor_wall_is_valid(const coord_def &pos)
@@ -1176,6 +1222,37 @@ static void _open_visitor_only_walls()
         const coord_def pos = marker->pos;
         housing_open_visitor_wall(pos);
     }
+}
+
+static bool _upgrade_legacy_owner_walls()
+{
+    if (!housing_is_owner())
+        return false;
+
+    bool changed = false;
+    // Work from a copy: dungeon_terrain_changed() can notify marker and view
+    // subsystems, but the authenticated marker itself remains in place.
+    const vector<map_marker*> markers = env.markers.get_all();
+    for (map_marker *marker : markers)
+    {
+        if (marker->get_type() != MAT_WIZ_PROPS
+            || marker->property(HOUSING_VISITOR_WALL_KEY) != "yes")
+        {
+            continue;
+        }
+        const coord_def pos = marker->pos;
+        if (!map_bounds(pos) || env.grid(pos) != DNGN_METAL_WALL
+            || !_visitor_wall_marker_at(pos))
+        {
+            continue;
+        }
+        dungeon_terrain_changed(pos, DNGN_CLEAR_PERMAROCK_WALL,
+                                false, false, true);
+        if (!_visitor_wall_marker_at(pos))
+            fail("Housing owner-only barrier migration was not atomic");
+        changed = true;
+    }
+    return changed;
 }
 
 static bool _ensure_spawn_fixture(const coord_def &pos)
@@ -1266,6 +1343,9 @@ static bool _ensure_housing_level(bool place_new_owner,
     {
         return false;
     }
+
+    if (_upgrade_legacy_owner_walls() && level_mutated)
+        *level_mutated = true;
 
     const bool player_position_valid = in_bounds(you.pos());
     const bool had_stored_spawn_data =
@@ -1432,6 +1512,11 @@ static bool _move_to_spawn(const vector<coord_def> &spawns,
 
 void housing_finish_map_entry(bool new_game_entry)
 {
+    // This hook runs both at the early level-load boundary and again after
+    // startup has reread rc options. Keep the restriction ahead of the
+    // idempotence guard so neither startup flags nor an old save can re-enable
+    // optional-death exploration in Housing.
+    housing_enforce_explore_mode();
     if (housing_current_role() == housing_role_type::none
         || _housing_map_entry_finished)
         return;
@@ -1563,6 +1648,123 @@ bool housing_is_spawn(const coord_def &pos)
     return std::find(spawns.begin(), spawns.end(), pos) != spawns.end();
 }
 
+static void _clear_housing_cell_to_floor(const coord_def &pos)
+{
+    tile_env.flv(pos).feat = 0;
+    tile_env.flv(pos).special = 0;
+    env.grid_colours(pos) = 0;
+    dungeon_terrain_changed(pos, DNGN_FLOOR, false, false, true);
+    tile_init_flavour(pos);
+}
+
+static bool _remove_housing_spawn(const coord_def &pos,
+                                  vector<coord_def> &spawns)
+{
+    const auto found = std::find(spawns.begin(), spawns.end(), pos);
+    if (found == spawns.end())
+        return false;
+    if (spawns.size() == 1)
+    {
+        mpr("Every Housing map must keep at least one spawn point.");
+        return false;
+    }
+    // Replacing a runelight with floor is safe underneath the owner, and is
+    // useful when moving the original spawn after creating a second one.
+    // Other actors still make the mutation ambiguous.
+    if (!_spawn_marker_at(pos) || (actor_at(pos) && pos != you.pos())
+        || env.igrid(pos) != NON_ITEM)
+    {
+        mpr("That Housing spawn point cannot be removed safely.");
+        return false;
+    }
+
+    map_marker *marker = env.markers.get_markers_at(pos).front();
+    env.markers.remove(marker);
+    _clear_housing_cell_to_floor(pos);
+    spawns.erase(found);
+    _store_spawns(spawns);
+    mpr("The Housing spawn point is removed.");
+    return true;
+}
+
+static bool _remove_housing_visitor_wall(const coord_def &pos)
+{
+    if (!_visitor_wall_marker_at(pos) || actor_at(pos)
+        || env.igrid(pos) != NON_ITEM || housing_is_spawn(pos))
+    {
+        mpr("That owner-only barrier cannot be removed safely.");
+        return false;
+    }
+
+    map_marker *marker = env.markers.get_markers_at(pos).front();
+    env.markers.remove(marker);
+    _clear_housing_cell_to_floor(pos);
+    mpr("The owner-only barrier is removed.");
+    return true;
+}
+
+static bool _remove_housing_shop(const coord_def &pos)
+{
+    const dungeon_feature_type feat = env.grid(pos);
+    const auto found = env.shop.find(pos);
+    const bool active = feat == DNGN_ENTER_SHOP;
+    const bool abandoned = feat == DNGN_ABANDONED_SHOP;
+
+    // Only erase a complete active shop pair, or an exhausted shop with no
+    // remaining shop record. A mismatched grid/table pair is corrupted state,
+    // not ordinary terrain which the editor may partially destroy.
+    if ((!active && !abandoned)
+        || (active && !_housing_shop_can_be_published(pos))
+        || (abandoned && found != env.shop.end())
+        || !env.markers.get_markers_at(pos).empty()
+        || env.igrid(pos) != NON_ITEM
+        || (actor_at(pos) && pos != you.pos()))
+    {
+        mpr("That Housing shop cannot be removed safely.");
+        return false;
+    }
+
+    if (active)
+    {
+        destroy_shop_at(pos);
+        if (env.shop.find(pos) != env.shop.end()
+            || env.grid(pos) != DNGN_ABANDONED_SHOP)
+        {
+            fail("Housing shop removal was not atomic");
+        }
+    }
+    _clear_housing_cell_to_floor(pos);
+    mpr("The Housing shop is removed.");
+    return true;
+}
+
+bool housing_clear_terrain(const coord_def &pos)
+{
+    if (!housing_authorize_action("clear terrain", 0) || !map_bounds(pos))
+        return false;
+
+    housing_ensure_level();
+    vector<coord_def> spawns = _stored_spawns();
+    if (std::find(spawns.begin(), spawns.end(), pos) != spawns.end())
+        return _remove_housing_spawn(pos, spawns);
+    if (_visitor_wall_marker_at(pos))
+        return _remove_housing_visitor_wall(pos);
+    if (env.grid(pos) == DNGN_ENTER_SHOP
+        || env.grid(pos) == DNGN_ABANDONED_SHOP
+        || env.shop.find(pos) != env.shop.end())
+    {
+        return _remove_housing_shop(pos);
+    }
+    if (!housing_can_edit(pos))
+    {
+        mpr("That square is protected in Housing.");
+        return false;
+    }
+
+    _clear_housing_cell_to_floor(pos);
+    return true;
+}
+
 bool housing_toggle_spawn_point(const coord_def &pos)
 {
     if (!housing_authorize_action("manage spawn points", 0)
@@ -1575,27 +1777,7 @@ bool housing_toggle_spawn_point(const coord_def &pos)
     vector<coord_def> spawns = _stored_spawns();
     const auto found = std::find(spawns.begin(), spawns.end(), pos);
     if (found != spawns.end())
-    {
-        if (spawns.size() == 1)
-        {
-            mpr("Every Housing map must keep at least one spawn point.");
-            return false;
-        }
-        if (!_spawn_marker_at(pos) || actor_at(pos)
-            || env.igrid(pos) != NON_ITEM)
-        {
-            mpr("That Housing spawn point cannot be removed safely.");
-            return false;
-        }
-
-        map_marker *marker = env.markers.get_markers_at(pos).front();
-        env.markers.remove(marker);
-        dungeon_terrain_changed(pos, DNGN_FLOOR, false, false, true);
-        spawns.erase(found);
-        _store_spawns(spawns);
-        mpr("The Housing spawn point is removed.");
-        return true;
-    }
+        return _remove_housing_spawn(pos, spawns);
 
     // New spawn fixtures are deliberately stricter than general terrain
     // editing: they may only replace an empty, marker-free ordinary floor.
@@ -1783,19 +1965,7 @@ bool housing_toggle_visitor_wall(const coord_def &pos)
     }
 
     if (_visitor_wall_marker_at(pos))
-    {
-        if (actor_at(pos) || env.igrid(pos) != NON_ITEM
-            || housing_is_spawn(pos))
-        {
-            mpr("That owner-only barrier cannot be removed safely.");
-            return false;
-        }
-        map_marker *marker = env.markers.get_markers_at(pos).front();
-        env.markers.remove(marker);
-        dungeon_terrain_changed(pos, DNGN_FLOOR, false, false, true);
-        mpr("The owner-only barrier is removed.");
-        return true;
-    }
+        return _remove_housing_visitor_wall(pos);
 
     if (!housing_can_edit(pos))
     {
@@ -1803,7 +1973,10 @@ bool housing_toggle_visitor_wall(const coord_def &pos)
         return false;
     }
 
-    dungeon_terrain_changed(pos, DNGN_METAL_WALL, false, false, true);
+    // Translucent permarock blocks movement without blocking LOS and cannot
+    // be dug or shattered, making it a stable monster enclosure for owners.
+    dungeon_terrain_changed(pos, DNGN_CLEAR_PERMAROCK_WALL,
+                            false, false, true);
     auto *marker = new map_wiz_props_marker(pos);
     marker->set_property(HOUSING_VISITOR_WALL_KEY, "yes");
     marker->set_property("feature_description", "owner-only barrier");
@@ -1811,7 +1984,8 @@ bool housing_toggle_visitor_wall(const coord_def &pos)
     env.markers.add(marker);
     if (!_visitor_wall_marker_at(pos))
         fail("Housing visitor wall creation was not atomic");
-    mpr("An opaque owner-only barrier rises; visitors can pass through it.");
+    mpr("A see-through owner-only barrier rises; visitors can pass through "
+        "it.");
     return true;
 }
 
@@ -1829,6 +2003,14 @@ bool housing_monster_type_allowed(monster_type type)
         return false;
     }
     return true;
+}
+
+bool housing_monster_is_owner_inert(const monster &mons)
+{
+    return housing_is_owner() && mons.alive()
+        && mons.props.exists(HOUSING_MONSTER_KEY)
+        && mons.props[HOUSING_MONSTER_KEY].get_type() == SV_BOOL
+        && mons.props[HOUSING_MONSTER_KEY].get_bool();
 }
 
 bool housing_create_monster()
@@ -2738,6 +2920,7 @@ static NORETURN void _return_to_owner(std::unique_ptr<package> staged,
 
     package *visitor = you.save;
     _housing_restore_name = you.your_name;
+    const string canonical_filename = _housing_owner_save->get_filename();
     you.save = nullptr;
     _housing_visitor_save = nullptr;
     visitor->abort();
@@ -2755,6 +2938,13 @@ static NORETURN void _return_to_owner(std::unique_ptr<package> staged,
     _housing_entry_requires_spawn = _housing_owner_map_changed;
     _housing_map_entry_finished = false;
     _housing_exact_map_rollback = false;
+    // A non-DGL WebTiles restart consults Options.game before the supplied
+    // staged package reaches restore_game(). Preserve the canonical identity
+    // across _reset_game(), just as the transactional rollback paths do, so
+    // Return Home can never fall through to the main menu or chargen.
+    Options.game.name = _housing_restore_name;
+    Options.game.type = GAME_TYPE_HOUSING;
+    Options.game.filename = get_base_filename(canonical_filename);
     macro_clear_mappings();
     game_ended(game_exit::housing_transition);
 }
@@ -3588,7 +3778,7 @@ static bool _current_map_can_be_published()
         if ((marker->get_type() != MAT_WIZ_PROPS
              || (!_portal_target_at(marker->pos, nullptr)
                  && !_spawn_marker_at(marker->pos)
-                 && !_visitor_wall_marker_at(marker->pos))))
+                 && !_current_visitor_wall_marker_at(marker->pos))))
         {
             mprf(MSGCH_ERROR,
                  "Housing publish rejected: marker %d at (%d,%d).",

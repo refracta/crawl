@@ -28,6 +28,7 @@
 #include "god-passive.h"
 #include "god-prayer.h"
 #include "hints.h"
+#include "housing.h"
 #include "item-name.h"
 #include "item-prop.h"
 #include "item-status-flag-type.h"
@@ -2836,6 +2837,17 @@ void handle_monsters(bool with_noise)
 {
     for (monster_iterator mi; mi; ++mi)
     {
+        // Housing monsters are editable map contents for their owner. Freeze
+        // them completely (including their accumulated action energy) so a
+        // translucent display barrier cannot permit smite-targeted or other
+        // full-LOS attacks. Visitors load the same monsters without this
+        // owner-only guard and they act normally after the barriers open.
+        if (housing_monster_is_owner_inert(**mi))
+        {
+            mi->drain_action_energy();
+            fire_final_effects();
+            continue;
+        }
         _pre_monster_move(**mi);
         if (!invalid_monster(*mi) && mi->alive() && mi->has_action_energy())
             monster_queue.emplace(*mi, mi->speed_increment);

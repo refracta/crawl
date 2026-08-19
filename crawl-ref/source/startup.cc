@@ -327,6 +327,9 @@ static void _post_init(bool newc)
     if (Options.no_save)
         you.wizard = true;
 #endif
+    // Do not expose a transient command-line explore flag to startup Lua.
+    // Wizard mode remains intentionally available in Housing.
+    housing_enforce_explore_mode();
 
     init_properties();
 
@@ -354,6 +357,9 @@ static void _post_init(bool newc)
     read_init_file(true);
     Options.fixup_options();
     read_startup_prefs();
+    // Command-line/rc options have just been reapplied. Remove Housing's
+    // explore flag before options are sent to WebTiles or input is possible.
+    housing_enforce_explore_mode();
 #ifdef USE_TILE_WEB
     tiles.send_options();
 #endif

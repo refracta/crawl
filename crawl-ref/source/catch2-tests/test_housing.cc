@@ -7,19 +7,25 @@
 #include "cloud.h"
 #include "dungeon.h"
 #include "env.h"
+#include "feature.h"
 #include "files.h"
 #include "housing.h"
 #include "jobs.h"
+#include "losparam.h"
 #include "mapmark.h"
 #include "menu.h"
 #include "mon-util.h"
+#include "monster.h"
+#include "options.h"
 #include "package.h"
 #include "player.h"
 #include "state.h"
 #include "tags.h"
 #include "shopping.h"
 #include "unwind.h"
+#include "terrain.h"
 #include "viewgeom.h"
+#include "wizard.h"
 
 #ifndef TARGET_OS_WINDOWS
 #include <sys/stat.h>
@@ -89,6 +95,63 @@ TEST_CASE("Housing map target validation is strict ASCII", "[single-file]")
     REQUIRE_FALSE(housing_valid_map_target("abc:map-name"));
     REQUIRE_FALSE(housing_valid_map_target("abc:mäp"));
     REQUIRE_FALSE(housing_valid_map_target("abc:123456789012345678901"));
+}
+
+TEST_CASE("Housing-created monsters are inert only for their owner",
+          "[single-file]")
+{
+    monster placed;
+    placed.type = MONS_RAT;
+    placed.hit_points = placed.max_hit_points = 1;
+    placed.props["housing_created_monster"] = true;
+
+    unwind_var<game_type> saved_game_type(crawl_state.type,
+                                          GAME_TYPE_HOUSING);
+    REQUIRE(housing_monster_is_owner_inert(placed));
+
+    crawl_state.type = GAME_TYPE_NORMAL;
+    REQUIRE_FALSE(housing_monster_is_owner_inert(placed));
+
+    crawl_state.type = GAME_TYPE_HOUSING;
+    placed.props.erase("housing_created_monster");
+    REQUIRE_FALSE(housing_monster_is_owner_inert(placed));
+}
+
+TEST_CASE("Housing disables explore mode but preserves wizard mode",
+          "[single-file]")
+{
+    unwind_var<game_type> saved_game_type(crawl_state.type,
+                                          GAME_TYPE_HOUSING);
+    unwind_var<wizard_option_type> saved_wiz_option(Options.wiz_mode,
+                                                     WIZ_YES);
+    unwind_var<wizard_option_type> saved_explore_option(Options.explore_mode,
+                                                         WIZ_YES);
+    unwind_var<bool> saved_wizard(you.wizard, true);
+    unwind_var<bool> saved_suppress(you.suppress_wizard, true);
+    unwind_var<bool> saved_explore(you.explore, true);
+    unwind_var<bool> saved_wizard_vision(you.wizard_vision, true);
+
+    housing_enforce_explore_mode();
+    REQUIRE(Options.wiz_mode == WIZ_YES);
+    REQUIRE(Options.explore_mode == WIZ_NEVER);
+    REQUIRE(you.wizard);
+    REQUIRE(you.suppress_wizard);
+    REQUIRE_FALSE(you.explore);
+    REQUIRE(you.wizard_vision);
+
+#ifdef WIZARD
+    you.explore = true;
+    enter_explore_mode();
+    REQUIRE_FALSE(you.explore);
+    REQUIRE(you.wizard);
+#endif
+
+    crawl_state.type = GAME_TYPE_NORMAL;
+    Options.explore_mode = WIZ_YES;
+    you.explore = true;
+    housing_enforce_explore_mode();
+    REQUIRE(Options.explore_mode == WIZ_YES);
+    REQUIRE(you.explore);
 }
 
 TEST_CASE("Housing branch theme ids and menu order are stable",
@@ -178,12 +241,13 @@ TEST_CASE("Housing ability ids remain append-only", "[single-file]")
 TEST_CASE("Housing snapshot schema is explicit and backwards compatible",
           "[single-file]")
 {
-    REQUIRE(housing_snapshot_schema_version() == 3);
+    REQUIRE(housing_snapshot_schema_version() == 4);
     REQUIRE(housing_snapshot_schema_supported(1));
     REQUIRE(housing_snapshot_schema_supported(2));
     REQUIRE(housing_snapshot_schema_supported(3));
+    REQUIRE(housing_snapshot_schema_supported(4));
     REQUIRE_FALSE(housing_snapshot_schema_supported(0));
-    REQUIRE_FALSE(housing_snapshot_schema_supported(4));
+    REQUIRE_FALSE(housing_snapshot_schema_supported(5));
     REQUIRE_FALSE(housing_snapshot_schema_supported(INT_MAX));
 }
 
@@ -246,7 +310,7 @@ struct housing_wall_cell_fixture
         for (map_marker *marker : env.markers.get_markers_at(pos))
             saved_markers.push_back(marker->clone());
         env.markers.remove_markers_at(pos);
-        env.grid(pos) = DNGN_METAL_WALL;
+        env.grid(pos) = DNGN_CLEAR_PERMAROCK_WALL;
         env.mgrid(pos) = NON_MONSTER;
         env.igrid(pos) = NON_ITEM;
     }
@@ -281,19 +345,38 @@ struct housing_wall_cell_fixture
 TEST_CASE("Housing visitor wall requires exact marker and terrain pairing",
           "[single-file]")
 {
+    init_show_table();
     const coord_def pos(20, 20);
     housing_wall_cell_fixture cell(pos);
+    REQUIRE_FALSE(housing_visitor_wall_is_valid(coord_def(-1, -1)));
 
-    SECTION("exact wall opens to floor")
+    SECTION("new translucent wall opens to floor")
     {
         cell.add_wall_marker();
         REQUIRE(housing_visitor_wall_is_valid(pos));
         unwind_var<game_type> saved_game_type(crawl_state.type,
                                               GAME_TYPE_HOUSING);
-        // Metal wall is generally editable, but its exact visitor-wall marker
-        // protects the pair from generic terrain editing.
-        REQUIRE(housing_feature_allowed(DNGN_METAL_WALL));
+        // The exact marker protects this generally editable terrain pair.
+        REQUIRE(housing_feature_allowed(DNGN_CLEAR_PERMAROCK_WALL));
+        REQUIRE(feat_is_solid(DNGN_CLEAR_PERMAROCK_WALL));
+        REQUIRE(feat_is_wall(DNGN_CLEAR_PERMAROCK_WALL));
+        REQUIRE(feat_is_permarock(DNGN_CLEAR_PERMAROCK_WALL));
+        REQUIRE_FALSE(feat_is_diggable(DNGN_CLEAR_PERMAROCK_WALL));
+        REQUIRE_FALSE(feat_is_opaque(DNGN_CLEAR_PERMAROCK_WALL));
+        REQUIRE(opc_default(pos) == OPC_CLEAR);
+        REQUIRE(opc_no_trans(pos) == OPC_OPAQUE);
+        REQUIRE(opc_solid(pos) == OPC_OPAQUE);
         REQUIRE_FALSE(housing_can_edit(pos));
+        housing_open_visitor_wall(pos);
+        REQUIRE(env.grid(pos) == DNGN_FLOOR);
+        REQUIRE(env.markers.get_markers_at(pos).empty());
+    }
+
+    SECTION("legacy metal wall remains readable")
+    {
+        env.grid(pos) = DNGN_METAL_WALL;
+        cell.add_wall_marker();
+        REQUIRE(housing_visitor_wall_is_valid(pos));
         housing_open_visitor_wall(pos);
         REQUIRE(env.grid(pos) == DNGN_FLOOR);
         REQUIRE(env.markers.get_markers_at(pos).empty());
@@ -334,6 +417,7 @@ TEST_CASE("Housing visitor wall requires exact marker and terrain pairing",
 TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
           "[single-file]")
 {
+    init_show_table();
     const coord_def old_start(20, 20);
     const coord_def template_spawn(21, 20);
     const coord_def ambiguous_spawn(22, 20);
@@ -480,6 +564,128 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE_FALSE(housing_toggle_spawn_point(ambiguous_spawn));
         REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
         REQUIRE_FALSE(housing_is_spawn(ambiguous_spawn));
+    }
+
+    SECTION("terrain clear removes a spawn but preserves the final one")
+    {
+        housing_ensure_level(false);
+        REQUIRE(housing_toggle_spawn_point(ambiguous_spawn));
+        you.position = ambiguous_spawn;
+        crawl_view.set_player_at(ambiguous_spawn);
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE_FALSE(housing_is_spawn(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
+
+        REQUIRE_FALSE(housing_clear_terrain(template_spawn));
+        REQUIRE(housing_is_spawn(template_spawn));
+        REQUIRE(env.grid(template_spawn) == DNGN_RUNELIGHT);
+        REQUIRE(env.markers.get_markers_at(template_spawn).size() == 1);
+    }
+
+    SECTION("owner-only barrier toggle creates a solid see-through wall")
+    {
+        housing_ensure_level(false);
+        REQUIRE(housing_toggle_visitor_wall(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_CLEAR_PERMAROCK_WALL);
+        REQUIRE(feat_is_solid(env.grid(ambiguous_spawn)));
+        REQUIRE_FALSE(feat_is_opaque(env.grid(ambiguous_spawn)));
+        REQUIRE(housing_visitor_wall_is_valid(ambiguous_spawn));
+        const vector<map_marker*> markers =
+            env.markers.get_markers_at(ambiguous_spawn);
+        REQUIRE(markers.size() == 1);
+        REQUIRE(markers.front()->property("housing_visitor_wall") == "yes");
+        REQUIRE(markers.front()->property("veto_destroy") == "veto");
+
+        REQUIRE(housing_toggle_visitor_wall(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
+    }
+
+    SECTION("terrain clear removes an authenticated owner-only barrier")
+    {
+        housing_ensure_level(false);
+        REQUIRE(housing_toggle_visitor_wall(ambiguous_spawn));
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
+    }
+
+    SECTION("terrain clear removes an active shop under the owner")
+    {
+        housing_ensure_level(false);
+        REQUIRE(env.shop.find(old_start) == env.shop.end());
+        const size_t original_shop_count = env.shop.size();
+        shop_struct merchant;
+        merchant.pos = old_start;
+        merchant.type = SHOP_GENERAL;
+        merchant.level = 1;
+        env.shop[old_start] = merchant;
+        env.grid(old_start) = DNGN_ENTER_SHOP;
+
+        REQUIRE(housing_clear_terrain(old_start));
+        REQUIRE(env.shop.size() == original_shop_count);
+        REQUIRE(env.shop.find(old_start) == env.shop.end());
+        REQUIRE(env.grid(old_start) == DNGN_FLOOR);
+        REQUIRE(env.markers.get_markers_at(old_start).empty());
+    }
+
+    SECTION("terrain clear removes only internally consistent shops")
+    {
+        housing_ensure_level(false);
+        env.grid(ambiguous_spawn) = DNGN_ENTER_SHOP;
+        REQUIRE(env.shop.find(ambiguous_spawn) == env.shop.end());
+        REQUIRE_FALSE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_ENTER_SHOP);
+
+        shop_struct orphan;
+        orphan.pos = ambiguous_spawn;
+        orphan.type = SHOP_GENERAL;
+        orphan.level = 1;
+        env.grid(ambiguous_spawn) = DNGN_FLOOR;
+        env.shop[ambiguous_spawn] = orphan;
+        REQUIRE_FALSE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.shop.find(ambiguous_spawn) != env.shop.end());
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        env.shop.erase(ambiguous_spawn);
+
+        env.grid(ambiguous_spawn) = DNGN_ENTER_SHOP;
+        env.shop[ambiguous_spawn] = orphan;
+        env.markers.add(new map_wiz_props_marker(ambiguous_spawn));
+        REQUIRE_FALSE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.shop.find(ambiguous_spawn) != env.shop.end());
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_ENTER_SHOP);
+        env.shop.erase(ambiguous_spawn);
+        env.markers.remove_markers_at(ambiguous_spawn);
+
+        env.grid(ambiguous_spawn) = DNGN_ABANDONED_SHOP;
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+    }
+
+    SECTION("terrain clear still handles ordinary editable terrain")
+    {
+        housing_ensure_level(false);
+        env.grid(ambiguous_spawn) = DNGN_STONE_WALL;
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+    }
+
+    SECTION("legacy metal owner-only barrier upgrades on owner load")
+    {
+        housing_ensure_level(false);
+        env.grid(ambiguous_spawn) = DNGN_METAL_WALL;
+        auto *marker = new map_wiz_props_marker(ambiguous_spawn);
+        marker->set_property("housing_visitor_wall", "yes");
+        marker->set_property("feature_description", "owner-only barrier");
+        marker->set_property("veto_destroy", "veto");
+        env.markers.add(marker);
+        REQUIRE(housing_visitor_wall_is_valid(ambiguous_spawn));
+
+        housing_ensure_level(false);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_CLEAR_PERMAROCK_WALL);
+        REQUIRE_FALSE(feat_is_opaque(env.grid(ambiguous_spawn)));
+        REQUIRE(housing_visitor_wall_is_valid(ambiguous_spawn));
     }
 
     SECTION("owner migration removes only unmarked legacy runelight residue")

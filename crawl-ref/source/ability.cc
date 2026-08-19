@@ -4242,7 +4242,7 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
 
     case ABIL_HOUSING_CLEAR_TERRAIN:
 #ifdef WIZARD
-        if (!wizard_create_feature(*target, DNGN_FLOOR, false, true))
+        if (!wizard_create_feature(*target, DNGN_FLOOR, false, true, true))
             return spret::abort;
         housing_checkpoint();
         break;

@@ -13,6 +13,7 @@
 #include "monster-type.h"
 
 class package;
+class monster;
 
 using std::string;
 using std::vector;
@@ -28,15 +29,20 @@ housing_role_type housing_current_role();
 const char *housing_role_name();
 bool housing_is_owner();
 bool housing_is_visitor();
+// Explore mode's optional-death semantics do not belong in persistent public
+// Housing. Strip it when restored from old saves or startup options; ordinary
+// wizard mode remains available for administration and testing.
+void housing_enforce_explore_mode();
 const string &housing_current_map_id();
 // Lobby/whereis identity for the currently displayed map. The ordinary
 // score-compatible place remains D:1; this supplementary field distinguishes
 // owner maps and visitor destinations.
 string housing_place();
 
-// Public snapshot compatibility is deliberately explicit: schema 3 is the
-// current writer, while readers retain the two strictly validated legacy
-// formats needed by already-published Housing maps.
+// Public snapshot compatibility is deliberately explicit: schema 4 is the
+// current capability for translucent owner-only barriers, while barrier-free
+// maps remain schema 3 for rolling-process compatibility. Readers retain all
+// three strictly validated legacy formats used by published Housing maps.
 int housing_snapshot_schema_version();
 bool housing_snapshot_schema_supported(int schema);
 
@@ -88,6 +94,11 @@ bool housing_is_spawn(const coord_def &pos);
 // selected existing spawn. Every mutation re-reads the externally managed
 // Housing point balance; a map can never lose its final spawn.
 bool housing_toggle_spawn_point(const coord_def &pos);
+// Clear one Housing cell through the normal terrain editor. Authenticated
+// spawn points, owner-only barriers and shops receive their own transactional
+// cleanup; ordinary editable terrain is changed directly to floor. The final
+// spawn point is always protected.
+bool housing_clear_terrain(const coord_def &pos);
 bool housing_can_edit(const coord_def &pos);
 bool housing_feature_allowed(dungeon_feature_type feat);
 dungeon_feature_type housing_last_feature();
@@ -100,12 +111,16 @@ bool housing_create_portal(const coord_def &pos, const string &target);
 // mutation time.
 bool housing_create_monster();
 bool housing_monster_type_allowed(monster_type type);
-// Toggle an opaque owner-only wall which is persisted/published but converted
-// to floor for visitors before marker activation and the first redraw.
+// Editor-created monsters are inert while their owner is arranging the map.
+// The same actors become fully active when the published level is loaded by a
+// visitor, after owner-only barriers have opened.
+bool housing_monster_is_owner_inert(const monster &mons);
+// Toggle a solid, translucent owner-only wall which is persisted/published
+// but converted to floor for visitors before marker activation and redraw.
 bool housing_toggle_visitor_wall(const coord_def &pos);
-// Loader boundary helpers. A visitor wall is accepted only when its metal
-// wall and exact veto marker agree; opening removes that marker and changes
-// the cell to floor before marker activation.
+// Loader boundary helpers. A visitor wall is accepted only when its current
+// translucent permarock (or legacy metal) terrain and exact veto marker agree;
+// opening removes that marker and changes the cell to floor before activation.
 bool housing_visitor_wall_is_valid(const coord_def &pos);
 void housing_open_visitor_wall(const coord_def &pos);
 bool housing_can_create_shop();

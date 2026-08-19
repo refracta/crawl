@@ -20,6 +20,7 @@
 #include "god-companions.h" // wizard_list_companions
 #include "god-passive.h" // jiyva_eat_offlevel_items
 #include "hiscores.h"
+#include "housing.h"
 #include "items.h"
 #include "luaterp.h" // debug_terp_lua
 #include "macro.h"
@@ -376,6 +377,13 @@ void handle_wizard_command()
 
 void enter_explore_mode()
 {
+    if (crawl_state.game_is_housing())
+    {
+        housing_enforce_explore_mode();
+        mpr("Explore mode is unavailable in Housing.");
+        return;
+    }
+
     // WIZ_NEVER gives protection for those who have wiz compiles,
     // and don't want to risk their characters.
     if (Options.explore_mode == WIZ_NEVER)

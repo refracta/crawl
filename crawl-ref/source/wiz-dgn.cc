@@ -280,8 +280,9 @@ bool wizard_create_feature(const coord_def& pos, dungeon_feature_type feat, bool
 }
 
 bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic,
-                           bool housing_edit)
+                           bool housing_edit, bool housing_clear)
 {
+    ASSERT(!housing_clear || housing_edit);
     if (housing_edit && !housing_feature_allowed(feat))
     {
         mpr("That terrain is not available in Housing.");
@@ -327,7 +328,17 @@ bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic,
         }
         coord_def &pos = target.target;
 
-        if (housing_edit)
+        if (housing_clear)
+        {
+            if (!housing_clear_terrain(pos))
+            {
+                if (!targeting_mode)
+                    return false;
+                continue;
+            }
+            changed = true;
+        }
+        else if (housing_edit)
         {
             if (!housing_can_edit(pos))
             {
@@ -342,7 +353,12 @@ bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic,
 
         bool done = false;
         bool success = false;
-        if (feat == DNGN_ENTER_SHOP)
+        if (housing_clear)
+        {
+            // housing_clear_terrain() has already performed the authenticated
+            // feature-specific mutation above.
+        }
+        else if (feat == DNGN_ENTER_SHOP)
         {
             success = debug_make_shop(pos);
             done = true;
