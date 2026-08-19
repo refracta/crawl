@@ -1419,6 +1419,7 @@ namespace quiver
 #endif
             case ABIL_HOUSING_BUILD_TERRAIN:
             case ABIL_HOUSING_CLEAR_TERRAIN:
+            case ABIL_HOUSING_CREATE_PORTAL:
                 return true;
             default:
                 return is_dynamic_targeted()

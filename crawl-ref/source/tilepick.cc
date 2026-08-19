@@ -4677,6 +4677,8 @@ tileidx_t tileidx_ability(const ability_type ability)
         return TILEG_ABILITY_WIZ_SET_TERRAIN;
     case ABIL_HOUSING_CLEAR_TERRAIN:
         return TILEG_ABILITY_WIZ_CLEAR_TERRAIN;
+    case ABIL_HOUSING_CREATE_PORTAL:
+        return TILEG_ABILITY_WIZ_BUILD_TERRAIN;
 
 #ifdef WIZARD
     case ABIL_WIZ_BUILD_TERRAIN:

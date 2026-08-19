@@ -27,6 +27,7 @@
 #include "god-passive.h" // passive_t::slow_abyss
 #include "hints.h"
 #include "hiscores.h"
+#include "housing.h"
 #include "item-name.h"
 #include "items.h"
 #include "level-state-type.h"
@@ -757,30 +758,8 @@ void rise_through_ceiling()
         dungeon_terrain_changed(you.pos(), DNGN_TRAP_SHAFT);
 }
 
-/**
- * Transition to a different level.
- *
- * @param how The type of stair/portal tile the player is being conveyed through
- * @param whence The tile the player was on at the beginning of the transition
- *               (likely the same as how, unless forced is true)
- * @param whither The destination level
- * @param shaft Is the player going down a shaft?
- */
-void floor_transition(dungeon_feature_type how,
-                      const dungeon_feature_type whence, level_id whither,
-                      bool forced, bool going_up, bool shaft,
-                      bool update_travel_cache)
+static void _clear_level_bound_player_state()
 {
-    const level_id old_level = level_id::current();
-
-    // Clean up fake blood.
-    heal_flayed_effect(&you, true, true);
-
-    // We "stepped".
-    if (!forced)
-        player_did_deliberate_movement();
-
-    // Magical level changes (which currently only exist "downwards") need this.
     you.stop_being_caught(true);
     stop_channelling_spells();
     you.stop_constricting_all();
@@ -826,6 +805,33 @@ void floor_transition(dungeon_feature_type how,
             if (mi->was_created_by(MON_SUMM_CACOPHONY))
                 monster_die(**mi, KILL_RESET, NON_MONSTER, true);
     }
+}
+
+/**
+ * Transition to a different level.
+ *
+ * @param how The type of stair/portal tile the player is being conveyed through
+ * @param whence The tile the player was on at the beginning of the transition
+ *               (likely the same as how, unless forced is true)
+ * @param whither The destination level
+ * @param shaft Is the player going down a shaft?
+ */
+void floor_transition(dungeon_feature_type how,
+                      const dungeon_feature_type whence, level_id whither,
+                      bool forced, bool going_up, bool shaft,
+                      bool update_travel_cache)
+{
+    const level_id old_level = level_id::current();
+
+    // Clean up fake blood.
+    heal_flayed_effect(&you, true, true);
+
+    // We "stepped".
+    if (!forced)
+        player_did_deliberate_movement();
+
+    // Magical level changes (which currently only exist "downwards") need this.
+    _clear_level_bound_player_state();
 
     // Fire level-leaving trigger.
     leaving_level_now(how);
@@ -1153,6 +1159,21 @@ void take_stairs(dungeon_feature_type force_stair, bool going_up,
 {
     const dungeon_feature_type old_feat = orig_terrain(you.pos());
     dungeon_feature_type how = force_stair ? force_stair : old_feat;
+
+    // Housing portals are server-mediated process handoffs, not Crawl level
+    // ids. Intercept them before _travel_destination tries to interpret the
+    // marker as an ordinary portal vault destination.
+    if (!force_stair && how == DNGN_ENTER_PORTAL_VAULT)
+    {
+        // A visitor->visitor handoff preserves portable character state, but
+        // effects tied to actors or terrain on the old map must end exactly as
+        // they do during a normal level transition. Do this only after the
+        // marker passes strict validation; malformed portals must be inert.
+        if (housing_portal_is_valid(you.pos()))
+            _clear_level_bound_player_state();
+        if (housing_take_portal(you.pos()))
+            return;
+    }
 
     // Taking a shaft manually (stepping on a known shaft, or using shaft ability)
     const bool known_shaft = (!force_stair

@@ -23,6 +23,7 @@
 #include "god-abil.h"
 #include "god-passive.h"
 #include "hints.h"
+#include "housing.h"
 #include "initfile.h"
 #include "item-name.h"
 #include "item-prop.h"
@@ -1099,6 +1100,15 @@ bool startup_step()
     newgame_def ng;
     if (choice.filename.empty() && !choice.name.empty())
         choice.filename = get_save_filename(choice.name);
+
+    // A visitor session is meaningful only as a disposable clone of an
+    // existing Housing character. Never fall through to character creation if
+    // the server-side session preparation failed or the clone is missing.
+    if (housing_is_visitor() && !save_exists(choice.filename))
+    {
+        game_ended(game_exit::abort,
+                   "Create a Housing character before visiting a map.");
+    }
 
     if (save_exists(choice.filename) && restore_game(choice.filename))
         save_player_name();

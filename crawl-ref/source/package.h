@@ -78,6 +78,11 @@ public:
     ~package();
     chunk_writer* writer(const string &name);
     chunk_reader* reader(const string &name);
+    // Copy one logical (decompressed) chunk from another package. The source
+    // package is never modified and the destination chunk is replaced only
+    // when its writer is finalised.
+    void copy_chunk_from(package &source, const string &source_name,
+                         const string &destination_name);
     void commit();
     void delete_chunk(const string &name);
     bool has_chunk(const string &name);

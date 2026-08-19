@@ -58,6 +58,7 @@
 #include "god-companions.h"
 #include "god-passive.h"
 #include "hints.h"
+#include "housing.h"
 #include "initfile.h"
 #include "item-name.h"
 #include "items.h"
@@ -2632,17 +2633,39 @@ static void _save_game_exit()
     if (!you.entering_level)
         save_level(level_id::current());
 
+    // Publish only after the canonical character and level chunks share one
+    // committed generation. A crash before the subsequent atomic rename can
+    // leave the previous public snapshot stale, but never half-written or
+    // ahead of the owner save.
+    if (crawl_state.game_is_housing() && housing_is_owner())
+    {
+        you.save->commit();
+        housing_publish_current_map();
+    }
+
     clrscr();
 
     save_game_prefs();
     update_whereis("saved");
 
 #ifdef USE_TILE_WEB
-    tiles.send_exit_reason("saved");
+    const bool housing_handoff = housing_transition_pending();
+    if (!housing_handoff)
+        tiles.send_exit_reason("saved");
 #endif
 
     delete you.save;
     you.save = 0;
+
+#ifdef USE_TILE_WEB
+    // A Housing handoff becomes visible to the server only after the package
+    // destructor has committed, truncated, unlocked, and closed the save.
+    if (housing_handoff)
+    {
+        housing_send_pending_transition();
+        tiles.send_exit_reason("saved");
+    }
+#endif
 }
 
 void save_game(bool leave_game, const char *farewellmsg)
@@ -3223,7 +3246,8 @@ static bool _restore_game(const string& filename)
 
     clear_message_store();
 
-    you.save = new package((_get_savefile_directory() + filename).c_str(), true);
+    you.save = housing_open_save_for_restore(
+        _get_savefile_directory() + filename);
 
     player_save_info save_info = _read_character_info(you.save);
     if (!save_info.save_loadable)
@@ -3306,7 +3330,10 @@ static bool _restore_game(const string& filename)
     }
 
 #ifdef CLUA_BINDINGS
-    if (you.save->has_chunk("lua"))
+    // Saved Lua can contain coordinates or monster ids from the previous
+    // public map. Visitor handoffs preserve the portable character state, not
+    // executable/map-bound Lua state.
+    if (!housing_is_visitor() && you.save->has_chunk("lua"))
     {
         vector<char> buf;
         chunk_reader inf(you.save, "lua");
@@ -3354,6 +3381,8 @@ static bool _restore_game(const string& filename)
         reader inf(you.save, CHUNK("de", "dlua_errors"), minorVersion);
         load_dlua_errors(inf);
     }
+
+    housing_scrub_visitor_transition_state();
 
     // Handle somebody SIGHUP'ing out of the skill menu with every skill
     // disabled. Doing this here rather in tags code because it can trigger

@@ -231,6 +231,28 @@ package::~package()
     dprintf("package: closed\n");
 }
 
+void package::copy_chunk_from(package &source, const string &source_name,
+                              const string &destination_name)
+{
+    ASSERT(&source != this);
+    ASSERT(source.has_chunk(source_name));
+    ASSERT(!destination_name.empty());
+
+    vector<char> data;
+    {
+        chunk_reader input(&source, source_name);
+        input.read_all(data);
+    }
+
+    // Tagged save chunks are never empty. Refuse to manufacture an invalid
+    // zero-block chunk if a corrupted source somehow decompresses to nothing.
+    if (data.empty())
+        corrupted("save file chunk \"%s\" is empty", source_name.c_str());
+
+    chunk_writer output(this, destination_name);
+    output.write(data.data(), data.size());
+}
+
 void package::commit()
 {
     ASSERT(rw);

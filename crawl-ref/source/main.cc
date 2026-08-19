@@ -486,7 +486,7 @@ NORETURN static void _launch_game()
     level_change();
 
     // Initialise save game so we can recover from crashes on D:1.
-    housing_reset_map_turns();
+    housing_finish_map_entry();
     if (crawl_state.game_is_housing())
         housing_checkpoint();
     else
