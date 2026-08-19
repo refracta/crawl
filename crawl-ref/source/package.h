@@ -75,6 +75,10 @@ class package
 public:
     package(const char* file, bool writeable, bool empty = false);
     package();
+    // Create an anonymous package in a caller-selected directory. This is
+    // useful for transactional clones in server processes whose inherited
+    // working directory is intentionally read-only.
+    explicit package(const string &temporary_directory);
     ~package();
     chunk_writer* writer(const string &name);
     chunk_reader* reader(const string &name);

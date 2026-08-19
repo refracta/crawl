@@ -143,6 +143,16 @@ static package *_housing_restore_save = nullptr;
 // Only a fully loaded map is promoted back into the canonical save.
 static package *_housing_owner_promotion_save = nullptr;
 static package *_housing_staged_owner_save = nullptr;
+// A failed in-process owner-map replacement restarts the ordinary game loop
+// with the last committed canonical package. Keep this token separate from
+// the staged-promotion pointer: _reset_game() clears the player, and WebTiles
+// has already re-read the rc file (which clears Options.game) by this point.
+// Without an explicit restore token startup can fall through to chargen.
+static bool _housing_owner_rollback_restore_pending = false;
+// A failed visitor replacement must likewise restart from the exact previous
+// disposable package. This token keeps that package out of save discovery and
+// chargen after _reset_game clears the runtime game type.
+static bool _housing_visitor_rollback_restore_pending = false;
 // True only when a staged owner restore actually replaces canonical D with a
 // different named map. Returning from a visit to the already-active map must
 // preserve its exact saved position and map-bound character references.
@@ -153,6 +163,10 @@ static bool _housing_owner_map_changed = false;
 // stale pre-fixture bytes staged for compatibility.
 static bool _housing_owner_template_needs_refresh = false;
 static string _housing_canonical_save_path;
+// The player object is cleared during an in-process restart and a staged
+// restore can fail before TAG_YOU repopulates it. Keep the authenticated owner
+// identity across that boundary for the one canonical rollback attempt.
+static string _housing_restore_name;
 static bool _housing_skip_next_checkpoint = false;
 static string _housing_current_map_id;
 static string _housing_current_map_owner;
@@ -686,7 +700,13 @@ package *housing_open_save_for_restore(const string &filename)
     {
         package *save = _housing_restore_save;
         _housing_restore_save = nullptr;
-        if (housing_is_owner())
+        // During an in-process restore, _reset_game() has cleared the game
+        // type and player. The transaction token, not housing_is_owner(), is
+        // therefore the authority until TAG_YOU restores crawl_state. A
+        // visitor rollback deliberately remains disposable/read-only.
+        if (housing_owner_restore_pending()
+            || (!_housing_visitor_rollback_restore_pending
+                && housing_is_owner()))
         {
             // A staged owner-map restore deliberately keeps the canonical
             // package separate until the replacement level and spawn are
@@ -2073,10 +2093,61 @@ static std::unique_ptr<package> _open_public_snapshot(const string &owner,
                                     meta);
 }
 
+static string _anonymous_package_directory(package &source)
+{
+    // Prefer the package's own directory: canonical owner saves and the first
+    // URL-visitor capsule both have a caller-selected filename. Relative
+    // console save paths remain valid because this is the exact path already
+    // opened by Crawl, not a separately supplied temp-directory setting.
+    const string source_path = source.get_filename();
+    if (!source_path.empty() && source_path != "[tmp]")
+    {
+        string source_dir = _path_without_trailing_separators(
+            get_parent_directory(source_path));
+        if (source_dir.empty())
+            source_dir = ".";
+        if (dir_exists(source_dir))
+            return source_dir;
+    }
+
+    // Later visitor-to-visitor hops use an already anonymous source. Prefer
+    // their server-created session root so disposable character data never
+    // acquires even a short-lived directory entry beside the canonical save.
+    const string session_dir = _path_without_trailing_separators(
+        _getenv_string("CRAWL_HOUSING_SESSION_DIR"));
+    if (is_absolute_path(session_dir) && dir_exists(session_dir))
+        return session_dir;
+
+    // Owner-origin visits have no session root. Keep their anonymous capsule
+    // beside the authenticated canonical save rather than falling back to the
+    // launcher's possibly read-only CWD.
+    if (!_housing_canonical_save_path.empty())
+    {
+        string canonical_dir = _path_without_trailing_separators(
+            get_parent_directory(_housing_canonical_save_path));
+        if (canonical_dir.empty())
+            canonical_dir = ".";
+        if (dir_exists(canonical_dir))
+            return canonical_dir;
+    }
+
+    const string canonical = _getenv_string("CRAWL_HOUSING_CANONICAL_SAVE");
+    if (is_absolute_path(canonical))
+    {
+        const string canonical_dir = _path_without_trailing_separators(
+            get_parent_directory(canonical));
+        if (dir_exists(canonical_dir))
+            return canonical_dir;
+    }
+
+    fail("Housing has no safe directory for its temporary save");
+}
+
 static std::unique_ptr<package> _clone_with_snapshot_level(
     package &source, package &snapshot)
 {
-    std::unique_ptr<package> clone(new package());
+    std::unique_ptr<package> clone(
+        new package(_anonymous_package_directory(source)));
     housing_copy_visitor_state(source, *clone);
     clone->copy_chunk_from(snapshot, HOUSING_LEVEL_CHUNK,
                            _housing_save_level_chunk());
@@ -2255,7 +2326,8 @@ static std::unique_ptr<package> _stage_owner_map(package &canonical,
         corrupted("The canonical Housing level does not match its map index");
     }
 
-    std::unique_ptr<package> staged(new package());
+    std::unique_ptr<package> staged(
+        new package(_anonymous_package_directory(canonical)));
     for (const string &chunk : canonical.list_chunks())
         staged->copy_chunk_from(canonical, chunk, chunk);
     if (legacy)
@@ -2286,10 +2358,22 @@ static NORETURN void _restart_canonical_after_owner_transition_failure(
 {
     if (!staged)
         staged = _housing_staged_owner_save;
-    if (_housing_restore_save == staged)
+    const string filename = canonical
+                                ? canonical->get_filename()
+                                : _housing_canonical_save_path;
+    if (_housing_restore_save == staged || _housing_restore_save == canonical)
         _housing_restore_save = nullptr;
     if (you.save == staged || you.save == canonical)
         you.save = nullptr;
+    if (_housing_owner_save == staged || _housing_owner_save == canonical)
+        _housing_owner_save = nullptr;
+    if (_housing_visitor_save == staged || _housing_visitor_save == canonical)
+        _housing_visitor_save = nullptr;
+    if (_housing_owner_promotion_save == staged
+        || _housing_owner_promotion_save == canonical)
+    {
+        _housing_owner_promotion_save = nullptr;
+    }
     _housing_staged_owner_save = nullptr;
     _housing_owner_map_changed = false;
     _housing_owner_template_needs_refresh = false;
@@ -2299,10 +2383,7 @@ static NORETURN void _restart_canonical_after_owner_transition_failure(
         delete staged;
     }
 
-    const string filename = canonical
-                                ? canonical->get_filename()
-                                : _housing_canonical_save_path;
-    if (canonical)
+    if (canonical && canonical != staged)
     {
         canonical->abort();
         delete canonical;
@@ -2320,6 +2401,8 @@ static NORETURN void _restart_canonical_after_owner_transition_failure(
     _housing_current_map_id = current_map;
     _housing_owner_save = reopened.release();
     _housing_restore_save = _housing_owner_save;
+    _housing_owner_rollback_restore_pending = true;
+    _housing_visitor_rollback_restore_pending = false;
     _housing_visitor_save = nullptr;
     _housing_skip_next_checkpoint = true;
     _housing_entry_requires_spawn = false;
@@ -2328,6 +2411,16 @@ static NORETURN void _restart_canonical_after_owner_transition_failure(
     if (exact_rollback)
         _housing_turn_origin = rollback_turn_origin;
     _housing_pending_notice = notice;
+    // _reset_game() clears crawl_state and the player, while _post_init() has
+    // already re-read the rc file and reset Options.game. Pin the canonical
+    // identity so the next startup is Housing before any role-dependent code
+    // runs. The restore hook still owns the package and never trusts this path
+    // to reopen or create a save.
+    if (!you.your_name.empty())
+        _housing_restore_name = you.your_name;
+    Options.game.name = _housing_restore_name;
+    Options.game.type = GAME_TYPE_HOUSING;
+    Options.game.filename = get_base_filename(filename);
     macro_clear_mappings();
     game_ended(game_exit::housing_transition);
 }
@@ -2376,6 +2469,9 @@ static void _promote_staged_owner_map(bool exact_rollback,
     catch (const std::exception &error)
     {
         dprf("Housing owner map promotion failed: %s", error.what());
+        fprintf(stderr, "Housing owner map promotion failed: %s\n",
+                error.what());
+        fflush(stderr);
         _restart_canonical_after_owner_transition_failure(
             staged, canonical,
             "That Housing map could not be saved safely; the last committed "
@@ -2391,23 +2487,55 @@ static void _promote_staged_owner_map(bool exact_rollback,
     _housing_owner_template_needs_refresh = false;
     _housing_owner_save = canonical;
     you.save = canonical;
+    _housing_restore_name.clear();
+}
+
+bool housing_transition_restore_pending()
+{
+    return housing_owner_restore_pending()
+        || _housing_visitor_rollback_restore_pending;
 }
 
 bool housing_owner_restore_pending()
 {
-    // The canonical promotion package is the transaction token. In
-    // particular this stays true if generic restore code clears you.save
-    // while reporting a malformed anonymous package.
-    return housing_is_owner() && _housing_owner_promotion_save;
+    // Both tokens outlive _reset_game() and remain true after
+    // housing_open_save_for_restore() consumes _housing_restore_save. This
+    // keeps staged and canonical rollback restores out of chargen and generic
+    // corrupted-save deletion prompts. Do not consult crawl_state or `you`
+    // here: _reset_game() deliberately clears both before startup asks this
+    // question again.
+    return _housing_owner_promotion_save
+        || _housing_owner_rollback_restore_pending;
 }
 
 bool housing_owner_restore_is_staged()
 {
-    return housing_owner_restore_pending() && _housing_staged_owner_save;
+    return _housing_owner_promotion_save && _housing_staged_owner_save;
 }
 
 void housing_complete_staged_owner_restore()
 {
+    if (_housing_visitor_rollback_restore_pending)
+    {
+        // The exact previous visitor package has passed restore_game(), all
+        // post-load startup work and its no-cleanup/no-respawn entry hook.
+        _housing_visitor_rollback_restore_pending = false;
+        _housing_restore_name.clear();
+        update_whereis();
+        return;
+    }
+    if (_housing_owner_rollback_restore_pending
+        && !housing_owner_restore_is_staged())
+    {
+        // The canonical package has passed restore_game(), _post_init(), level
+        // validation, rc/Lua initialisation and the first view setup. It is
+        // now safe for later transitions to distinguish this completed
+        // rollback from a still-guarded restart.
+        _housing_owner_rollback_restore_pending = false;
+        _housing_restore_name.clear();
+        update_whereis();
+        return;
+    }
     if (!housing_owner_restore_is_staged())
         return;
 
@@ -2422,12 +2550,50 @@ void housing_complete_staged_owner_restore()
 
 void housing_rollback_staged_owner_restore()
 {
-    if (!housing_owner_restore_pending())
+    if (!housing_transition_restore_pending())
         return;
 
     _housing_entry_requires_spawn = false;
+    if ((_housing_owner_rollback_restore_pending
+         || _housing_visitor_rollback_restore_pending)
+        && !_housing_owner_promotion_save)
+    {
+        // The one allowed exact rollback has itself failed to restore.
+        // Retrying the same bytes would create an unbounded housing_transition
+        // loop. Drop every alias before deleting the package once, then stop
+        // this process without ever offering chargen or save deletion.
+        std::set<package*> failed_saves;
+        failed_saves.insert(you.save);
+        failed_saves.insert(_housing_owner_save);
+        failed_saves.insert(_housing_restore_save);
+        failed_saves.insert(_housing_staged_owner_save);
+        failed_saves.insert(_housing_owner_promotion_save);
+        failed_saves.insert(_housing_visitor_save);
+        failed_saves.erase(nullptr);
+        you.save = nullptr;
+        _housing_owner_save = nullptr;
+        _housing_restore_save = nullptr;
+        _housing_staged_owner_save = nullptr;
+        _housing_owner_promotion_save = nullptr;
+        _housing_visitor_save = nullptr;
+        _housing_owner_rollback_restore_pending = false;
+        _housing_visitor_rollback_restore_pending = false;
+        _housing_owner_map_changed = false;
+        _housing_owner_template_needs_refresh = false;
+        _housing_restore_name.clear();
+        for (package *failed : failed_saves)
+        {
+            failed->abort();
+            delete failed;
+        }
+        game_ended(game_exit::crash,
+                   "The previous Housing state could not be "
+                   "restored safely.");
+    }
+
+    package *canonical = _housing_owner_promotion_save;
     _restart_canonical_after_owner_transition_failure(
-        _housing_staged_owner_save, _housing_owner_promotion_save,
+        _housing_staged_owner_save, canonical,
         "That Housing owner map could not be loaded safely; the last "
         "committed owner state was restored.");
 }
@@ -2443,6 +2609,7 @@ static NORETURN void _return_to_owner(std::unique_ptr<package> staged,
     ASSERT(you.save);
 
     package *visitor = you.save;
+    _housing_restore_name = you.your_name;
     you.save = nullptr;
     _housing_visitor_save = nullptr;
     visitor->abort();
@@ -2541,6 +2708,7 @@ static bool _enter_owner_map(const string &target_map)
     }
 
     package *canonical = you.save;
+    _housing_restore_name = you.your_name;
     package *staged_save = nullptr;
     const int rollback_turn_origin = _housing_turn_origin;
     try
@@ -2584,6 +2752,9 @@ static bool _enter_owner_map(const string &target_map)
     catch (const std::exception &error)
     {
         dprf("Housing owner map transition failed: %s", error.what());
+        fprintf(stderr, "Housing owner map transition failed: %s\n",
+                error.what());
+        fflush(stderr);
         _housing_entry_requires_spawn = false;
         _restart_canonical_after_owner_transition_failure(
             staged_save, canonical,
@@ -2945,6 +3116,60 @@ bool housing_manage_maps()
     }
 }
 
+static NORETURN void _restart_previous_map_after_visit_failure(
+    package *next, package *previous, housing_role_type previous_role,
+    const string &previous_owner, const string &previous_map,
+    const string &player_name, int rollback_turn_origin,
+    const string &error)
+{
+    fprintf(stderr, "Housing visitor map transition failed: %s\n",
+            error.c_str());
+    fflush(stderr);
+
+    if (you.save == next)
+        you.save = nullptr;
+    if (_housing_visitor_save == next)
+        _housing_visitor_save = nullptr;
+    next->abort();
+    delete next;
+
+    _housing_restore_name = player_name;
+    if (previous_role == housing_role_type::owner)
+    {
+        _restart_canonical_after_owner_transition_failure(
+            nullptr, previous,
+            "That Housing map could not be loaded safely; the previous map "
+            "was restored.", true, rollback_turn_origin);
+    }
+
+    // A visitor-to-visitor failure restores the still-open disposable package
+    // exactly once. It is not discoverable in the save directory, so pin both
+    // its role and startup identity across _reset_game rather than allowing
+    // DGL startup to fall through to save discovery or chargen.
+    ASSERT(previous_role == housing_role_type::visitor);
+    _housing_runtime_role = housing_role_type::visitor;
+    _housing_current_map_owner = previous_owner;
+    _housing_current_map_id = previous_map;
+    _housing_restore_save = previous;
+    _housing_owner_save = nullptr;
+    _housing_visitor_save = previous;
+    _housing_owner_rollback_restore_pending = false;
+    _housing_visitor_rollback_restore_pending = true;
+    _housing_skip_next_checkpoint = false;
+    _housing_entry_requires_spawn = false;
+    _housing_map_entry_finished = false;
+    _housing_exact_map_rollback = true;
+    _housing_turn_origin = rollback_turn_origin;
+    _housing_pending_notice =
+        "That Housing map could not be loaded safely; the previous map was "
+        "restored.";
+    Options.game.name = _housing_restore_name;
+    Options.game.type = GAME_TYPE_HOUSING;
+    Options.game.filename = get_save_filename(_housing_restore_name);
+    macro_clear_mappings();
+    game_ended(game_exit::housing_transition);
+}
+
 static void _replace_with_visitor_map(std::unique_ptr<package> replacement,
                                       const string &owner,
                                       const string &map_id)
@@ -2958,6 +3183,7 @@ static void _replace_with_visitor_map(std::unique_ptr<package> replacement,
     const bool previous_was_owner = previous_role == housing_role_type::owner;
     const string previous_map_owner = _housing_current_map_owner;
     const string previous_map_id = _housing_current_map_id;
+    const string previous_player_name = you.your_name;
     const int rollback_turn_origin = _housing_turn_origin;
     if (previous_was_owner)
         _housing_canonical_save_path = previous->get_filename();
@@ -2980,30 +3206,22 @@ static void _replace_with_visitor_map(std::unique_ptr<package> replacement,
         const level_id old_level = level_id::current();
         load_level(DNGN_UNSEEN, LOAD_HOUSING_REPLACE, old_level);
     }
-    catch (...)
+    catch (const std::exception &error)
     {
         // The loader may already have reset global level state, so continuing
         // the input loop is unsafe. Roll the whole Crawl game state back from
         // the still-open previous package, while retaining the process/socket.
-        you.save = nullptr;
-        next->abort();
-        delete next;
-        _housing_runtime_role = previous_role;
-        _housing_current_map_owner = previous_map_owner;
-        _housing_current_map_id = previous_map_id;
-        _housing_restore_save = previous;
-        _housing_owner_save = previous_was_owner ? previous : nullptr;
-        _housing_visitor_save = previous_was_owner ? nullptr : previous;
-        _housing_skip_next_checkpoint = previous_was_owner;
-        _housing_entry_requires_spawn = false;
-        _housing_map_entry_finished = false;
-        _housing_exact_map_rollback = true;
-        _housing_turn_origin = rollback_turn_origin;
-        _housing_pending_notice =
-            "That Housing map could not be loaded safely; the previous map "
-            "was restored.";
-        macro_clear_mappings();
-        game_ended(game_exit::housing_transition);
+        _restart_previous_map_after_visit_failure(
+            next, previous, previous_role, previous_map_owner,
+            previous_map_id, previous_player_name, rollback_turn_origin,
+            error.what());
+    }
+    catch (...)
+    {
+        _restart_previous_map_after_visit_failure(
+            next, previous, previous_role, previous_map_owner,
+            previous_map_id, previous_player_name, rollback_turn_origin,
+            "unknown exception");
     }
 
     // The replacement is fully loaded now. Close the prior package; a durable

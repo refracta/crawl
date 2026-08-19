@@ -1005,3 +1005,56 @@ TEST_CASE("Package chunks can be copied without sharing storage",
     }
     REQUIRE(string(original.begin(), original.end()) == payload);
 }
+
+#ifndef TARGET_OS_WINDOWS
+TEST_CASE("Anonymous packages can use an explicit writable directory",
+          "[single-file]")
+{
+    char root_template[] = "/tmp/crawl-package-directory-XXXXXX";
+    char *created_root = mkdtemp(root_template);
+    REQUIRE(created_root != nullptr);
+    const string root = created_root;
+
+    char original_cwd[4096];
+    REQUIRE(getcwd(original_cwd, sizeof(original_cwd)) != nullptr);
+    bool cleaned = false;
+    unwinder restore_filesystem = [&]() {
+        if (!cleaned)
+        {
+            const int chdir_result = chdir(original_cwd);
+            const int rmdir_result = rmdir(root.c_str());
+            (void) chdir_result;
+            (void) rmdir_result;
+        }
+    };
+
+#ifdef __linux__
+    // DGAMELAUNCH likewise starts Crawl in a directory where its uid cannot
+    // create files. procfs makes that property deterministic even for a test
+    // process running as root.
+    REQUIRE(chdir("/proc/self") == 0);
+#endif
+
+    {
+        package staged(root);
+        _write_test_chunk(staged, "D", "staged level");
+        staged.commit();
+        REQUIRE(staged.has_chunk("D"));
+
+        package clone(root);
+        clone.copy_chunk_from(staged, "D", "D");
+        clone.commit();
+        REQUIRE(_read_test_chunk(clone, "D") == "staged level");
+
+        // mkstemp's directory entry is removed immediately; only the open fd
+        // owns either transactional package until this scope ends.
+        REQUIRE(get_dir_files_ext(root, "").empty());
+    }
+
+    REQUIRE_THROWS(package(catpath(root, "missing")));
+    REQUIRE(get_dir_files_ext(root, "").empty());
+    REQUIRE(chdir(original_cwd) == 0);
+    REQUIRE(rmdir(root.c_str()) == 0);
+    cleaned = true;
+}
+#endif

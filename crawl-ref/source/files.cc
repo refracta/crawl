@@ -141,7 +141,8 @@ static void _ghost_dprf(const char *format, ...)
 static bool _ghost_version_compatible(const save_version &version);
 
 static bool _restore_tagged_chunk(package *save, const string &name,
-                                  tag_type tag, const char* complaint);
+                                  tag_type tag, const char* complaint,
+                                  bool safe_read = false);
 static player_save_info _read_character_info(package *save);
 
 static bool _convert_obsolete_species();
@@ -2234,7 +2235,12 @@ bool load_level(dungeon_feature_type stair_taken, load_mode_type load_mode,
         }
 
         dprf("Loading old level '%s'.", level_name.c_str());
-        _restore_tagged_chunk(you.save, level_name, TAG_LEVEL, "Level file is invalid.");
+        const bool safe_housing_read =
+            load_mode == LOAD_HOUSING_REPLACE
+            || housing_transition_restore_pending()
+            || (load_mode == LOAD_RESTART_GAME && housing_is_visitor());
+        _restore_tagged_chunk(you.save, level_name, TAG_LEVEL,
+                              "Level file is invalid.", safe_housing_read);
         housing_prepare_loaded_level();
         if (load_mode != LOAD_VISITOR)
             you.on_current_level = true;
@@ -3268,8 +3274,8 @@ static bool _restore_game(const string& filename)
     player_save_info save_info = _read_character_info(you.save);
     if (!save_info.save_loadable)
     {
-        if (housing_owner_restore_pending())
-            fail("The staged Housing owner character is incompatible");
+        if (housing_transition_restore_pending())
+            fail("The transactional Housing character is incompatible");
         // Note: if we are here, the save info was properly read, it would
         // raise an exception otherwise.
         if (yesno(("There is an existing game for name '" + save_info.name +
@@ -3297,8 +3303,8 @@ static bool _restore_game(const string& filename)
     if (!crawl_state.bypassed_startup_menu
         && menu_game_type != crawl_state.type)
     {
-        if (housing_owner_restore_pending())
-            fail("The staged Housing owner game type changed");
+        if (housing_transition_restore_pending())
+            fail("The transactional Housing game type changed");
         auto atype = article_a(_type_name_processed(save_info.saved_game_type));
         if (!yesno(("You already have " + atype +
                     " game saved under the name '" + save_info.name + "';\n"
@@ -3320,8 +3326,8 @@ static bool _restore_game(const string& filename)
     if (numcmp(save_info.prev_save_version.c_str(), Version::Long, 2) == -1
         && version_is_stable(save_info.prev_save_version.c_str()))
     {
-        if (housing_owner_restore_pending())
-            fail("The staged Housing owner save requires a version prompt");
+        if (housing_transition_restore_pending())
+            fail("The transactional Housing save requires a version prompt");
         if (!yesno(("This game comes from a previous release of Crawl (" +
                     save_info.prev_save_version + ").\n\nIf you load it now,"
                     " you won't be able to go back. Continue?").c_str(),
@@ -3424,10 +3430,10 @@ bool restore_game(const string& filename)
     }
     catch (corrupted_save &err)
     {
-        // A visitor -> owner transition is restoring an anonymous staged clone,
-        // never the canonical save. Let startup's transaction guard roll it
-        // back; do not offer to delete it or fall through to character creation.
-        if (housing_owner_restore_pending())
+        // Housing transitions restore an anonymous staged clone or a supplied
+        // previous package. Let startup's transaction guard roll it back; do
+        // not offer deletion or fall through to character creation.
+        if (housing_transition_restore_pending())
             throw;
         if (yesno(make_stringf(
                    "There exists a save by that name but it appears to be invalid.\n"
@@ -3626,6 +3632,16 @@ static bool _convert_obsolete_species()
 {
     // At this point the character has been loaded but not resaved, but the grid, lua, stashes, etc have not been.
 #if TAG_MAJOR_VERSION == 34
+    if (housing_transition_restore_pending()
+        && (you.species == SP_LAVA_ORC || you.species == SP_VAMPIRE
+            || you.species == SP_ARMATAUR))
+    {
+        // Housing transition restores are transactional and non-interactive.
+        // Let startup's guard dispose the package exactly once; the ordinary
+        // conversion rejection paths below delete you.save themselves.
+        fail("The Housing save requires an obsolete-species prompt");
+    }
+
     if (you.species == SP_LAVA_ORC)
     {
         if (!yesno(
@@ -3797,32 +3813,39 @@ static bool _tagged_chunk_version_compatible(reader &inf, string* reason)
 }
 
 static bool _restore_tagged_chunk(package *save, const string &name,
-                                  tag_type tag, const char* complaint)
+                                  tag_type tag, const char* complaint,
+                                  bool safe_read)
 {
     reader inf(save, name);
-    string reason;
-    if (!_tagged_chunk_version_compatible(inf, &reason))
-    {
-        if (!complaint)
-        {
-            dprf("chunk %s: %s", name.c_str(), reason.c_str());
-            return false;
-        }
-        else
-            end(-1, false, "\n%s %s\n", complaint, reason.c_str());
-    }
-
-    crawl_state.minor_version = inf.getMinorVersion();
+    // Public Housing levels are external snapshot payloads. A truncated
+    // version header must unwind into the transactional map rollback instead
+    // of calling die_noline() before the loader's exception guard can run.
+    inf.set_safe_read(safe_read);
     try
     {
+        string reason;
+        if (!_tagged_chunk_version_compatible(inf, &reason))
+        {
+            if (!complaint)
+            {
+                dprf("chunk %s: %s", name.c_str(), reason.c_str());
+                return false;
+            }
+            else if (safe_read)
+                fail("%s %s", complaint, reason.c_str());
+            else
+                end(-1, false, "\n%s %s\n", complaint, reason.c_str());
+        }
+
+        crawl_state.minor_version = inf.getMinorVersion();
         tag_read(inf, tag);
+        inf.fail_if_not_eof(name);
     }
     catch (const short_read_exception&)
     {
         fail("truncated save chunk (%s)", name.c_str());
-    };
+    }
 
-    inf.fail_if_not_eof(name);
     return true;
 }
 

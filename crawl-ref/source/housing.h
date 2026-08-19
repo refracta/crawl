@@ -139,9 +139,12 @@ bool housing_resolve_public_snapshot_path(const string &public_dir,
                                           const string &map_id,
                                           string &snapshot_path);
 
-// Visitor -> owner returns restore through an anonymous target-map package.
-// The pending predicate is true even before restore_game installs that package
-// as you.save; startup.cc guards restore plus all post-load initialisation.
+// Housing map transitions may restart from an anonymous staged owner package
+// or the exact previous owner/visitor package after a failed replacement.
+// These predicates stay true after _reset_game clears crawl_state and before
+// restore_game installs the supplied package as you.save, so startup.cc can
+// guard restore plus all post-load initialisation without entering chargen.
+bool housing_transition_restore_pending();
 bool housing_owner_restore_pending();
 bool housing_owner_restore_is_staged();
 void housing_complete_staged_owner_restore();

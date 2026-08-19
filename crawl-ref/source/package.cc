@@ -132,6 +132,11 @@ package::package(const char* file, bool writeable, bool empty)
 }
 
 package::package()
+  : package("")
+{
+}
+
+package::package(const string &temporary_directory)
   : rw(true), n_users(0), dirty(false), aborted(false)
 #ifdef DO_FSYNC
     , tmp(true)
@@ -140,17 +145,40 @@ package::package()
     dprintf("package: initializing tmp file\n");
     filename = "[tmp]";
 
-    char file[7] = "XXXXXX";
-    fd = mkstemp(file);
+    string temporary_file;
+    if (temporary_directory.empty())
+        temporary_file = "XXXXXX";
+    else
+    {
+        temporary_file = temporary_directory;
+        const char last = temporary_file[temporary_file.size() - 1];
+        if (last != '/' && last != '\\')
+            temporary_file += '/';
+        temporary_file += ".crawl-package-XXXXXX";
+    }
+    vector<char> file(temporary_file.begin(), temporary_file.end());
+    file.push_back('\0');
+    fd = mkstemp(file.data());
     if (fd == -1)
-        sysfail("can't create temporary save file");
+        sysfail("can't create temporary save file in %s",
+                temporary_directory.empty() ? "the working directory"
+                                            : temporary_directory.c_str());
 
-    ::unlink(file); // FIXME: won't work on Windows
+#if !defined(TARGET_OS_WINDOWS) || defined(CRAWL_HAVE_MKSTEMP)
+    if (::unlink(file.data()) == -1)
+    {
+        const int unlink_errno = errno;
+        close(fd);
+        fd = -1;
+        errno = unlink_errno;
+        sysfail("can't unlink temporary save file (%s)", file.data());
+    }
+#endif
 
     if (!lock_file(fd, true))
     {
         close(fd);
-        sysfail("failed to lock newly created save (%s)", file);
+        sysfail("failed to lock newly created save (%s)", file.data());
     }
 
     dirty = true;

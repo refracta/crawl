@@ -1110,12 +1110,13 @@ bool startup_step()
 
     try
     {
-        if (housing_owner_restore_pending())
+        if (housing_transition_restore_pending())
         {
-            // The staged anonymous package is supplied by the Housing restore
-            // hook. Never consult canonical file existence or enter chargen.
+            // A staged owner package or exact previous owner/visitor package
+            // is supplied by the Housing restore hook. Never consult save
+            // discovery or enter chargen during this one-shot transaction.
             if (!restore_game(choice.filename))
-                fail("The staged Housing owner restore was rejected");
+                fail("The transactional Housing restore was rejected");
             save_player_name();
         }
         else
@@ -1156,13 +1157,13 @@ bool startup_step()
     }
     catch (const game_ended_condition&)
     {
-        if (housing_owner_restore_pending())
+        if (housing_transition_restore_pending())
             housing_rollback_staged_owner_restore();
         throw;
     }
     catch (...)
     {
-        if (housing_owner_restore_pending())
+        if (housing_transition_restore_pending())
             housing_rollback_staged_owner_restore();
         throw;
     }
