@@ -6,6 +6,7 @@
 #include "branch.h"
 #include "cloud.h"
 #include "dgn-overview.h"
+#include "directn.h"
 #include "dungeon.h"
 #include "env.h"
 #include "feature.h"
@@ -554,6 +555,13 @@ TEST_CASE("Housing ability ids remain append-only", "[single-file]")
     REQUIRE(ABIL_LAST_HOUSING == ABIL_HOUSING_SHOW_COORDINATES);
 }
 
+TEST_CASE("Housing editor self-targeting rejects without cancelling",
+          "[single-file]")
+{
+    REQUIRE(housing_editor_self_target_policy()
+            == confirm_prompt_type::none);
+}
+
 TEST_CASE("Housing snapshot schema is explicit and backwards compatible",
           "[single-file]")
 {
@@ -892,6 +900,23 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
     crawl_view.set_player_at(old_start);
     REQUIRE(cloud_at(template_spawn) == nullptr);
 
+    SECTION("editor self-selection reaches domain validation")
+    {
+        direction_chooser_args args;
+        args.restricts = DIR_ENFORCE_RANGE;
+        args.mode = TARG_NON_ACTOR;
+        args.range = LOS_MAX_RANGE;
+        args.needs_path = false;
+        args.self = housing_editor_self_target_policy();
+        dist selected;
+        selected.target = you.pos();
+
+        direction(selected, args);
+        REQUIRE(selected.isValid);
+        REQUIRE_FALSE(selected.isCancel);
+        REQUIRE_FALSE(selected.interactive);
+    }
+
     SECTION("one bare runelight is authenticated and used")
     {
         housing_ensure_level(true);
@@ -1053,6 +1078,26 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
                 == housing_publish_problem_type::invalid_spawn);
         REQUIRE(before.position == template_spawn);
 
+        REQUIRE(housing_clear_terrain(template_spawn));
+        REQUIRE(env.grid(template_spawn) == DNGN_RUNELIGHT);
+        REQUIRE(housing_is_spawn(template_spawn));
+        REQUIRE(housing_validate_current_map().valid());
+    }
+
+    SECTION("Clear repairs a final stored spawn with damaged terrain")
+    {
+        housing_ensure_level(false);
+        env.grid(template_spawn) = DNGN_ORB_DAIS;
+
+        const housing_publish_validation before =
+            housing_validate_current_map();
+        REQUIRE_FALSE(before.valid());
+        REQUIRE(before.problem
+                == housing_publish_problem_type::unsupported_feature);
+        REQUIRE(before.position == template_spawn);
+
+        // Raw spawn membership must route around strict migration even though
+        // the filtered spawn view no longer considers this terrain valid.
         REQUIRE(housing_clear_terrain(template_spawn));
         REQUIRE(env.grid(template_spawn) == DNGN_RUNELIGHT);
         REQUIRE(housing_is_spawn(template_spawn));

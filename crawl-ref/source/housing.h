@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "confirm-prompt-type.h"
 #include "coord-def.h"
 #include "dungeon-feature-type.h"
 #include "monster-type.h"
@@ -30,6 +31,10 @@ housing_role_type housing_current_role();
 const char *housing_role_name();
 bool housing_is_owner();
 bool housing_is_visitor();
+// Housing editors validate actor occupancy after a cell is selected. Selecting
+// the owner's own cell is therefore an ordinary rejected placement, not a
+// request to cancel the persistent targeting modal.
+confirm_prompt_type housing_editor_self_target_policy();
 // Explore mode's optional-death semantics do not belong in persistent public
 // Housing. Strip it when restored from old saves or startup options; ordinary
 // wizard mode remains available for administration and testing.

@@ -806,6 +806,11 @@ bool housing_is_visitor()
     return housing_current_role() == housing_role_type::visitor;
 }
 
+confirm_prompt_type housing_editor_self_target_policy()
+{
+    return confirm_prompt_type::none;
+}
+
 void housing_enforce_explore_mode()
 {
     if (!crawl_state.game_is_housing())
@@ -1510,6 +1515,26 @@ static vector<coord_def> _stored_spawns()
     return result;
 }
 
+static bool _raw_stored_spawns_contain(const coord_def &pos)
+{
+    if (!env.properties.exists(HOUSING_SPAWNS_KEY))
+        return false;
+
+    const CrawlStoreValue &stored = env.properties[HOUSING_SPAWNS_KEY];
+    if (stored.get_type() != SV_VEC)
+        return false;
+
+    const CrawlVector &spawns = stored.get_vector();
+    if (spawns.get_type() != SV_COORD)
+        return false;
+
+    return std::any_of(spawns.begin(), spawns.end(),
+                       [&pos](const CrawlStoreValue &spawn)
+                       {
+                           return spawn.get_coord() == pos;
+                       });
+}
+
 static void _store_spawns(const vector<coord_def> &spawns)
 {
     env.properties.erase(HOUSING_SPAWNS_KEY);
@@ -1926,6 +1951,28 @@ static void _discard_housing_shop_state_at(const coord_def &pos)
     env.shop.erase(pos);
 }
 
+static void _force_clear_housing_cell_to_floor(const coord_def &pos)
+{
+    // This path handles publisher-rejected state, including an invalid feature
+    // enum and the Orb dais. Do not ask the ordinary terrain mutator to inspect
+    // or preserve the damaged old feature.
+    unnotice_feature(level_pos(level_id::current(), pos));
+    env.grid(pos) = DNGN_FLOOR;
+    env.pgrid(pos).flags = 0;
+    env.grid_colours(pos) = 0;
+    tile_env.flv(pos).feat = 0;
+    tile_env.flv(pos).feat_idx = 0;
+    tile_env.flv(pos).special = 0;
+    tile_init_flavour(pos);
+    set_terrain_changed(pos);
+    if (you.see_cell(pos))
+    {
+        update_terrain_knowledge(pos);
+        StashTrack.update_stash(pos);
+        redraw_view_at(pos);
+    }
+}
+
 static bool _repair_or_remove_malformed_spawn(
     const coord_def &pos, vector<coord_def> &spawns)
 {
@@ -1946,7 +1993,7 @@ static bool _repair_or_remove_malformed_spawn(
 
     _discard_housing_shop_state_at(pos);
     env.markers.remove_markers_at(pos);
-    _clear_housing_cell_to_floor(pos);
+    _force_clear_housing_cell_to_floor(pos);
     if (has_other_spawn)
     {
         spawns.erase(std::remove(spawns.begin(), spawns.end(), pos),
@@ -1977,25 +2024,7 @@ static bool _clear_malformed_housing_fixture(const coord_def &pos)
     }
     _discard_housing_shop_state_at(pos);
     env.markers.remove_markers_at(pos);
-    // The ordinary terrain mutator intentionally refuses an Orb dais and
-    // assumes its old feature enum is valid. This path exists specifically to
-    // recover publisher-rejected state, so do not trust or preserve any
-    // terrain metadata on the selected cell.
-    unnotice_feature(level_pos(level_id::current(), pos));
-    env.grid(pos) = DNGN_FLOOR;
-    env.pgrid(pos).flags = 0;
-    env.grid_colours(pos) = 0;
-    tile_env.flv(pos).feat = 0;
-    tile_env.flv(pos).feat_idx = 0;
-    tile_env.flv(pos).special = 0;
-    tile_init_flavour(pos);
-    set_terrain_changed(pos);
-    if (you.see_cell(pos))
-    {
-        update_terrain_knowledge(pos);
-        StashTrack.update_stash(pos);
-        redraw_view_at(pos);
-    }
+    _force_clear_housing_cell_to_floor(pos);
     mpr("The damaged Housing fixture is cleared.");
     return true;
 }
@@ -2140,8 +2169,10 @@ bool housing_clear_terrain(const coord_def &pos)
     // spawn for repair: it would throw before Clear could fix the coordinate
     // named by the publication diagnostic.
     vector<coord_def> spawns = _stored_spawns();
-    const bool selected_stored_spawn =
-        std::find(spawns.begin(), spawns.end(), pos) != spawns.end();
+    // _stored_spawns() deliberately filters entries whose terrain is no longer
+    // floor/runelight. Clear still needs tolerant raw membership so a damaged
+    // final spawn can reach the repair path instead of strict migration.
+    bool selected_stored_spawn = _raw_stored_spawns_contain(pos);
     const bool exact_spawn = _spawn_marker_at(pos);
     const bool repairing_spawn =
         (selected_stored_spawn && !exact_spawn)
@@ -2150,9 +2181,11 @@ bool housing_clear_terrain(const coord_def &pos)
     {
         housing_ensure_level();
         spawns = _stored_spawns();
+        selected_stored_spawn =
+            std::find(spawns.begin(), spawns.end(), pos) != spawns.end();
     }
     const bool items_cleared = _clear_housing_items(pos);
-    if (std::find(spawns.begin(), spawns.end(), pos) != spawns.end())
+    if (selected_stored_spawn)
     {
         if (_spawn_marker_at(pos))
             return _remove_housing_spawn(pos, spawns) || items_cleared;
@@ -2731,7 +2764,7 @@ bool housing_create_monster()
     args.mode = TARG_NON_ACTOR;
     args.range = LOS_MAX_RANGE;
     args.needs_path = false;
-    args.self = confirm_prompt_type::cancel;
+    args.self = housing_editor_self_target_policy();
     args.top_prompt = "Place housing monster: <w>" +
                       mons_type_name(type, DESC_PLAIN) + "</w>\n"
                       "[<w>Space/Enter/.</w>] place and continue, "

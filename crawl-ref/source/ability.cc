@@ -3119,8 +3119,12 @@ static bool _activate_talent_once(const talent& tal, dist *target,
             args.show_floor_desc = true;
             args.show_boring_feats = false;
         }
-        args.self = testbits(abil.flags, abflag::not_self) ?
-            confirm_prompt_type::cancel : confirm_prompt_type::none;
+        args.self = _housing_repeats_via_ability(abil.ability)
+                    && target->interactive
+                    ? housing_editor_self_target_policy()
+                    : testbits(abil.flags, abflag::not_self)
+                        ? confirm_prompt_type::cancel
+                        : confirm_prompt_type::none;
 
         if (!spell_direction(*target, beam, &args))
         {
