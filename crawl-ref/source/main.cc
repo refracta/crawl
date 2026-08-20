@@ -1805,17 +1805,21 @@ static void _experience_check()
 
     if (!crawl_state.game_is_sprint())
     {
-        if (zot_immune())
-            msg::stream << "You are forever immune to Zot's power.";
-        else if (player_in_branch(BRANCH_ABYSS))
-            msg::stream << "You have unlimited time to explore this branch.";
-        else
+        if (!crawl_state.game_is_housing())
         {
-            msg::stream << "Zot will find you in " << turns_until_zot()
-                        << " turns if you stay in this branch and explore no"
-                        << " new floors.";
+            if (zot_immune())
+                msg::stream << "You are forever immune to Zot's power.";
+            else if (player_in_branch(BRANCH_ABYSS))
+                msg::stream << "You have unlimited time to explore this branch.";
+            else
+            {
+                msg::stream << "Zot will find you in " << turns_until_zot()
+                            << " turns if you stay in this branch and explore no"
+                            << " new floors.";
+            }
+            msg::stream << endl;
         }
-        msg::stream << endl << gem_status();
+        msg::stream << gem_status();
     }
 
 #ifdef DEBUG_DIAGNOSTICS

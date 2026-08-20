@@ -39,6 +39,7 @@
 #include "god-passive.h" // passive_t::bless_followers, convert_orcs
 #include "hints.h"
 #include "hiscores.h"
+#include "housing.h"
 #include "item-name.h"
 #include "item-prop.h"
 #include "item-status-flag-type.h"
@@ -1144,6 +1145,12 @@ static bool _monster_avoided_death(monster* mons, killer_type killer,
     if (can_be_thrall)
         mons->props.erase(VAMPIRIC_THRALL_KEY);
 
+    // Housing editor fixtures die normally and permanently. Native revival,
+    // conversion, and split mechanics would otherwise create untracked actors
+    // which cannot be edited or safely published.
+    if (housing_monster_was_created(*mons))
+        return false;
+
     if (mons->max_hit_points <= 0 || mons->get_hit_dice() < 1)
         return false;
 
@@ -1253,7 +1260,8 @@ void fire_monster_death_event(monster* mons,
 
     los_monster_died(mons);
 
-    if (type == MONS_ROYAL_JELLY && !mons->is_summoned() && !polymorph)
+    if (!housing_monster_was_created(*mons)
+        && type == MONS_ROYAL_JELLY && !mons->is_summoned() && !polymorph)
     {
         you.royal_jelly_dead = true;
 
@@ -2621,7 +2629,12 @@ item_def* monster_die(monster& mons, killer_type killer,
     const bool summoned      = mons.is_summoned();
     int  duration            = summoned ? mons.get_ench(ENCH_SUMMON_TIMER).duration : 0;
     const int monster_killed = mons.mindex();
-    const bool hard_reset    = testbits(mons.flags, MF_HARD_RESET);
+    const bool housing_fixture = housing_monster_was_created(mons);
+    // Some otherwise-placeable monster classes are intrinsically hard-reset.
+    // Housing fixtures still need the normal drop path so only their marked
+    // generated gear vanishes while anything acquired later is recoverable.
+    const bool hard_reset = testbits(mons.flags, MF_HARD_RESET)
+                            && !housing_fixture;
     const bool timeout       = killer == KILL_TIMEOUT;
     const bool gives_player_xp = mons_gives_xp(mons, you);
     bool drop_items          = !hard_reset;
@@ -2695,14 +2708,16 @@ item_def* monster_die(monster& mons, killer_type killer,
     //
     // (It's possible some other things should be moved here, but dead code that
     // deals primarily with messaging seems fine to override by exploding)
-    if (mons.type == MONS_PROTEAN_PROGENITOR && real_death)
+    if (!housing_fixture && mons.type == MONS_PROTEAN_PROGENITOR && real_death)
     {
         _protean_explosion(&mons);
         silent = true;
     }
-    else if (mons.type == MONS_SPRIGGAN_DRUID && !silent && real_death)
+    else if (!housing_fixture && mons.type == MONS_SPRIGGAN_DRUID
+             && !silent && real_death)
         _druid_final_boon(&mons);
-    else if (mons.type == MONS_VAMPIRE_BAT && !silent && !mons_reset
+    else if (!housing_fixture && mons.type == MONS_VAMPIRE_BAT
+             && !silent && !mons_reset
              && mons.props.exists(BLORKULA_REVIVAL_TIMER_KEY))
     {
         _blorkula_bat_death(mons, killer, killer_index);
@@ -2731,7 +2746,7 @@ item_def* monster_die(monster& mons, killer_type killer,
     }
     // Only transform if we 'died' to timeout. Something simply dealing damage
     // to us can still shatter us.
-    else if (mons.type == MONS_BLOCK_OF_ICE
+    else if (!housing_fixture && mons.type == MONS_BLOCK_OF_ICE
              && mons.has_ench(ENCH_SIMULACRUM_SCULPTING)
              && timeout)
     {
@@ -2757,7 +2772,8 @@ item_def* monster_die(monster& mons, killer_type killer,
 
         silent = true;
     }
-    else if (mons.type == MONS_BLAZEHEART_GOLEM && real_death && !timeout)
+    else if (!housing_fixture && mons.type == MONS_BLAZEHEART_GOLEM
+             && real_death && !timeout)
     {
         // Only blow up if non-dormant
         if (grid_distance(mons.pos(), you.pos()) <= 1)
@@ -2791,7 +2807,8 @@ item_def* monster_die(monster& mons, killer_type killer,
             silent = true;
         }
     }
-    else if (mons.type == MONS_MARTYRED_SHADE && !silent && real_death)
+    else if (!housing_fixture && mons.type == MONS_MARTYRED_SHADE
+             && !silent && real_death)
     {
         // Don't cause transformation on the player killing their own shade.
         // (Angering them will normally make them disappear, but if you do
@@ -2804,13 +2821,15 @@ item_def* monster_die(monster& mons, killer_type killer,
             return nullptr;
         }
     }
-    else if (mons.type == MONS_HOARFROST_CANNON && real_death
+    else if (!housing_fixture && mons.type == MONS_HOARFROST_CANNON
+             && real_death
              && env.grid(mons.pos()) == DNGN_FLOOR)
     {
         temp_change_terrain(mons.pos(), DNGN_SHALLOW_WATER, random_range(50, 80),
                             TERRAIN_CHANGE_FLOOD);
     }
-    else if (mons.type == MONS_SPLINTERFROST_BARRICADE && real_death
+    else if (!housing_fixture && mons.type == MONS_SPLINTERFROST_BARRICADE
+             && real_death
              && !timeout)
     {
         coord_def aim;
@@ -2825,7 +2844,7 @@ item_def* monster_die(monster& mons, killer_type killer,
                 silent = true;
         }
     }
-    else if (mons.type == MONS_INUGAMI && real_death)
+    else if (!housing_fixture && mons.type == MONS_INUGAMI && real_death)
     {
         if (&mons == find_canine_familiar())
         {
@@ -2835,7 +2854,8 @@ item_def* monster_die(monster& mons, killer_type killer,
         }
     }
     // Note that 'timeout' deaths happen when the player leaves the floor.
-    else if (mons.type == MONS_SOLAR_EMBER && real_death && !timeout)
+    else if (!housing_fixture && mons.type == MONS_SOLAR_EMBER
+             && real_death && !timeout)
     {
         you.props[SOLAR_EMBER_REVIVAL_KEY].get_int() = you.elapsed_time + random_range(200, 320);
         if (!you.can_see(mons))
@@ -2855,7 +2875,7 @@ item_def* monster_die(monster& mons, killer_type killer,
         end_flayed_effect(&mons);
     else if (mons.type == MONS_PLAYER_SHADOW)
         dithmenos_cleanup_player_shadow(&mons);
-    else if (mons.type == MONS_ORB_GUARDIAN
+    else if (!housing_fixture && mons.type == MONS_ORB_GUARDIAN
              && (real_death || killer == KILL_BANISHED)
              && level_id::current() == level_id(BRANCH_ZOT, 5)
              && !player_on_orb_run()
@@ -2886,15 +2906,17 @@ item_def* monster_die(monster& mons, killer_type killer,
             activate_tesseracts();
         }
     }
-    else if (mons.type == MONS_ERYTHROSPITE && !mons.is_abjurable())
+    else if (!housing_fixture && mons.type == MONS_ERYTHROSPITE
+             && !mons.is_abjurable())
         bleed_onto_floor(mons.pos(), MONS_ERYTHROSPITE, 100, false);
-    else if (mons.type == MONS_ROYAL_JELLY && mons.hit_points > 0
+    else if (!housing_fixture && mons.type == MONS_ROYAL_JELLY
+             && mons.hit_points > 0
              && real_death && !summoned)
     {
         schedule_trj_spawn_fineff(&you, &mons, mons.pos(), mons.hit_points);
     }
 
-    if (mons.has_ench(ENCH_MAGNETISED))
+    if (!housing_fixture && mons.has_ench(ENCH_MAGNETISED))
     {
         place_cloud(CLOUD_MAGNETISED_DUST, mons.pos(),
                         random_range(7, 11),
@@ -2902,7 +2924,7 @@ item_def* monster_die(monster& mons, killer_type killer,
     }
 
     bool suppress_corpse = false;
-    if (count_kill && mons.has_ench(ENCH_RIMEBLIGHT)
+    if (!housing_fixture && count_kill && mons.has_ench(ENCH_RIMEBLIGHT)
         && !silent && !was_banished && !mons_reset
         && mons.props.exists(RIMEBLIGHT_DEATH_KEY))
     {
@@ -2923,7 +2945,7 @@ item_def* monster_die(monster& mons, killer_type killer,
                                     SPELL_RIMEBLIGHT);
     }
 
-    if (monster_explodes(mons))
+    if (!housing_fixture && monster_explodes(mons))
     {
         did_death_message =
             explode_monster(&mons, killer, pet_kill);
@@ -2957,7 +2979,7 @@ item_def* monster_die(monster& mons, killer_type killer,
                                 MSGCH_MONSTER_DAMAGE, MDAM_DEAD);
         did_death_message = true;
     }
-    if (mons.type == MONS_DANCING_WEAPON)
+    if (!housing_fixture && mons.type == MONS_DANCING_WEAPON)
     {
         int w_idx = mons.inv[MSLOT_WEAPON];
         ASSERT(w_idx != NON_ITEM);
@@ -3060,7 +3082,7 @@ item_def* monster_die(monster& mons, killer_type killer,
         if (mons.hit_points == -1000)
             silent = true;
     }
-    else if (mons.type == MONS_ARMOUR_ECHO)
+    else if (!housing_fixture && mons.type == MONS_ARMOUR_ECHO)
         drop_items = false;
 
     const bool death_message = !silent && !did_death_message
@@ -3371,7 +3393,7 @@ item_def* monster_die(monster& mons, killer_type killer,
     }
 
     // None of these effects should trigger on illusory copies.
-    if (!mons.is_illusion())
+    if (!housing_fixture && !mons.is_illusion())
     {
         if (mons.type == MONS_BORIS && !in_transit && !mons.pacified())
         {
@@ -3420,7 +3442,8 @@ item_def* monster_die(monster& mons, killer_type killer,
     }
 
     // Must be done after health is set to zero and monster is properly marked dead.
-    if (mons.type == MONS_BOUNDLESS_TESSERACT && killer != KILL_RESET)
+    if (!housing_fixture && mons.type == MONS_BOUNDLESS_TESSERACT
+        && killer != KILL_RESET)
     {
         you.props.erase(TESSERACT_SPAWN_COUNTER_KEY);
 
@@ -3475,11 +3498,13 @@ item_def* monster_die(monster& mons, killer_type killer,
         destroy_tentacle(&mons);
     // Give the treant a last chance to release its hornets if it is killed in a
     // single blow from above half health
-    else if (mons.type == MONS_SHAMBLING_MANGROVE && real_death)
+    else if (!housing_fixture && mons.type == MONS_SHAMBLING_MANGROVE
+             && real_death)
         treant_release_fauna(mons);
-    else if (mons.type == MONS_PHARAOH_ANT && real_death)
+    else if (!housing_fixture && mons.type == MONS_PHARAOH_ANT && real_death)
         _pharaoh_ant_bind_souls(&mons);
-    else if (!mons.is_summoned() && mummy_curse_power(mons.type) > 0)
+    else if (!housing_fixture && !mons.is_summoned()
+             && mummy_curse_power(mons.type) > 0)
     {
         // TODO: set attacker better? (Player attacker is handled by checking
         // killer when running the fineff.)
@@ -3498,7 +3523,8 @@ item_def* monster_die(monster& mons, killer_type killer,
                             gives_player_xp || (mons.flags & MF_TESSERACT_SPAWN),
                             pet_kill);
 
-    if (mons.has_ench(ENCH_RIMEBLIGHT) && !was_banished && !mons_reset)
+    if (!housing_fixture && mons.has_ench(ENCH_RIMEBLIGHT)
+        && !was_banished && !mons_reset)
     {
         if (you.can_see(mons))
             mprf("Plague seeps from the dead %s.", mons.name(DESC_PLAIN).c_str());
@@ -3568,7 +3594,7 @@ item_def* monster_die(monster& mons, killer_type killer,
     if (!silent && !mons_reset && !exploded)
         _print_summon_poof_message(mons, real_death);
 
-    if (!was_banished && !mons_reset && !exploded)
+    if (!housing_fixture && !was_banished && !mons_reset && !exploded)
         _monster_die_cloud(mons, real_death);
 
     item_def* corpse = nullptr;
@@ -3797,12 +3823,15 @@ void monster_cleanup(monster* mons, bool reset)
     if (mons->affects_agrid())
         invalidate_agrid();
 
-    if (mons->type == MONS_PLATINUM_PARAGON && mons->was_created_by(you, SPELL_PLATINUM_PARAGON))
+    const bool housing_fixture = housing_monster_was_created(*mons);
+    if (!housing_fixture && mons->type == MONS_PLATINUM_PARAGON
+        && mons->was_created_by(you, SPELL_PLATINUM_PARAGON))
         you.duration[DUR_PARAGON_ACTIVE] = 0;
-    if (mons->type == MONS_SEISMOSAURUS_EGG)
+    if (!housing_fixture && mons->type == MONS_SEISMOSAURUS_EGG)
         for (distance_iterator di(mons->pos(), false, false, 4); di; ++di)
             env.pgrid(*di) &= ~FPROP_SEISMOROCK;
-    else if (mons->type == MONS_HELLFIRE_MORTAR && mons->summoner == MID_PLAYER)
+    else if (!housing_fixture && mons->type == MONS_HELLFIRE_MORTAR
+             && mons->summoner == MID_PLAYER)
     {
         const int dur = hellfire_mortar_cooldown_length(mons->props[HELLFIRE_PATH_KEY].get_vector().size());
         you.duration[DUR_HELLFIRE_MORTAR_COOLDOWN] = dur;
@@ -3860,6 +3889,11 @@ item_def* mounted_kill(monster* real_mon, monster_type mc, killer_type killer,
     // Need to copy ENCH_SUMMON_TIMER etc. or we could get real XP/meat from a summon.
     mon.enchantments = real_mon->enchantments;
     mon.ench_cache = real_mon->ench_cache;
+
+    // A rider explicitly marked as leaving no corpse must not manufacture a
+    // second corpse through its synthetic mount-death pass.
+    if (real_mon->props.exists(NEVER_CORPSE_KEY))
+        mon.props[NEVER_CORPSE_KEY] = true;
 
     mon.attitude = real_mon->attitude;
     mon.damage_friendly = real_mon->damage_friendly;

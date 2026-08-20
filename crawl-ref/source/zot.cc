@@ -64,7 +64,9 @@ static int& _zot_clock()
 
 static bool _zot_clock_active_in(branch_type br)
 {
-    return br != BRANCH_ABYSS && !zot_immune() && !crawl_state.game_is_sprint();
+    return br != BRANCH_ABYSS && !zot_immune()
+           && !crawl_state.game_is_sprint()
+           && !crawl_state.game_is_housing();
 }
 
 // Is the zot clock running, or is it paused or stopped altogether?
@@ -239,6 +241,13 @@ void incr_zot_clock()
 
 void set_turns_until_zot(int turns_left)
 {
+    // Housing is a persistent editing/social space rather than a dungeon
+    // branch. Keep old clock data inert for save compatibility, but never let
+    // Wizard commands or future callers create or mutate it while Housing is
+    // active.
+    if (crawl_state.game_is_housing())
+        return;
+
     if (turns_left < 0 || turns_left > MAX_ZOT_CLOCK / BASELINE_DELAY)
         return;
 

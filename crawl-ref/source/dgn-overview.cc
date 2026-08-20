@@ -29,6 +29,7 @@
 #include "religion.h"
 #include "scroller.h"
 #include "stairs.h"
+#include "state.h"
 #include "store.h" //for level_id()
 #include "stringutil.h"
 #include "tag-version.h"
@@ -302,7 +303,8 @@ static string _get_seen_branches(bool display)
             level_id lid(branch, 0);
             lid = find_deepest_explored(lid);
             const int bzot = bezotting_level_in(branch);
-            const bool show_zot = lid.depth > 0 && !zot_immune()
+            const bool show_zot = !crawl_state.game_is_housing()
+                            && lid.depth > 0 && !zot_immune()
                             && (Options.always_show_zot
                                 || you.has_mutation(MUT_SHORT_LIFESPAN)
                                 || bzot > 0); // 1000 turns for non-Meteorae

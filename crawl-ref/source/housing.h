@@ -94,10 +94,10 @@ bool housing_is_spawn(const coord_def &pos);
 // selected existing spawn. Every mutation re-reads the externally managed
 // Housing point balance; a map can never lose its final spawn.
 bool housing_toggle_spawn_point(const coord_def &pos);
-// Clear one Housing cell through the normal terrain editor. Authenticated
-// spawn points, owner-only barriers and shops receive their own transactional
-// cleanup; ordinary editable terrain is changed directly to floor. The final
-// spawn point is always protected.
+// Clear one Housing cell and destroy its complete ground-item stack.
+// Authenticated portals, spawn points, owner-only barriers and shops receive
+// their own transactional cleanup; ordinary editable terrain is changed
+// directly to floor. The final spawn point itself is always protected.
 bool housing_clear_terrain(const coord_def &pos);
 bool housing_can_edit(const coord_def &pos);
 bool housing_feature_allowed(dungeon_feature_type feat);
@@ -111,6 +111,9 @@ bool housing_create_portal(const coord_def &pos, const string &target);
 // mutation time.
 bool housing_create_monster();
 bool housing_monster_type_allowed(monster_type type);
+// This role-independent identity survives publication and visitor loading so
+// ordinary death cleanup can suppress native monster lifecycle side effects.
+bool housing_monster_was_created(const monster &mons);
 // Editor-created monsters are inert while their owner is arranging the map.
 // The same actors become fully active when the published level is loaded by a
 // visitor, after owner-only barriers have opened.

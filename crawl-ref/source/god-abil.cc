@@ -3743,7 +3743,11 @@ bool gozag_call_merchant()
 
 bool housing_call_merchant()
 {
-    if (env.grid(you.pos()) != DNGN_FLOOR)
+    if (env.grid(you.pos()) != DNGN_FLOOR
+        || env.igrid(you.pos()) != NON_ITEM
+        || !env.markers.get_markers_at(you.pos()).empty()
+        || env.shop.find(you.pos()) != env.shop.end()
+        || housing_is_spawn(you.pos()))
     {
         mpr("You need to be standing on unoccupied floor to call a merchant.");
         return false;

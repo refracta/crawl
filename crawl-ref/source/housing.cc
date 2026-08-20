@@ -26,6 +26,7 @@
 
 #include "act-iter.h"
 #include "actor.h"
+#include "artefact.h"
 #include "branch.h"
 #include "cloud.h"
 #include "coord.h"
@@ -41,6 +42,8 @@
 #include "god-passive.h"
 #include "hiscores.h"
 #include "initfile.h"
+#include "item-status-flag-type.h"
+#include "items.h"
 #include "mapdef.h"
 #include "mapmark.h"
 #include "macro.h"
@@ -273,6 +276,7 @@ static string _getenv_string(const char *name);
 static bool _ensure_owner_map_storage();
 static bool _housing_shop_can_be_published(const coord_def &pos);
 static bool _current_visitor_wall_marker_at(const coord_def &pos);
+static bool _portal_target_at(const coord_def &pos, string *target);
 static void _promote_staged_owner_map(bool exact_rollback = false,
                                       int rollback_turn_origin = -1);
 static void _open_visitor_only_walls();
@@ -1255,6 +1259,32 @@ static bool _upgrade_legacy_owner_walls()
     return changed;
 }
 
+static bool _housing_created_monster(const monster &mons)
+{
+    return mons.props.exists(HOUSING_MONSTER_KEY)
+           && mons.props[HOUSING_MONSTER_KEY].get_type() == SV_BOOL
+           && mons.props[HOUSING_MONSTER_KEY].get_bool();
+}
+
+static bool _suppress_legacy_housing_monster_remains()
+{
+    bool changed = false;
+    for (monster &mons : menv_real)
+    {
+        if (!mons.alive() || !_housing_created_monster(mons)
+            || mons.props.exists(NEVER_CORPSE_KEY))
+        {
+            continue;
+        }
+        // Old public/canonical maps predate the no-remains invariant. This
+        // property is understood by the ordinary death and necromancy paths,
+        // and is safe to add to both canonical and disposable visitor levels.
+        mons.props[NEVER_CORPSE_KEY] = true;
+        changed = true;
+    }
+    return changed;
+}
+
 static bool _ensure_spawn_fixture(const coord_def &pos)
 {
     if (!_valid_spawn(pos))
@@ -1345,6 +1375,8 @@ static bool _ensure_housing_level(bool place_new_owner,
     }
 
     if (_upgrade_legacy_owner_walls() && level_mutated)
+        *level_mutated = true;
+    if (_suppress_legacy_housing_monster_remains() && level_mutated)
         *level_mutated = true;
 
     const bool player_position_valid = in_bounds(you.pos());
@@ -1657,6 +1689,26 @@ static void _clear_housing_cell_to_floor(const coord_def &pos)
     tile_init_flavour(pos);
 }
 
+static bool _clear_housing_items(const coord_def &pos)
+{
+    bool removed = false;
+    for (stack_iterator item(pos); item; ++item)
+    {
+        // Clear terrain is deliberately destructive: clearing a square also
+        // clears every item on it, including old corpses, skeletons, generated
+        // monster equipment, and ordinary player-dropped items.
+        item_was_destroyed(*item);
+        destroy_item(item.index());
+        removed = true;
+    }
+    if (removed)
+    {
+        StashTrack.update_stash(pos);
+        mpr("The items on that square are cleared away.");
+    }
+    return removed;
+}
+
 static bool _remove_housing_spawn(const coord_def &pos,
                                   vector<coord_def> &spawns)
 {
@@ -1703,6 +1755,33 @@ static bool _remove_housing_visitor_wall(const coord_def &pos)
     return true;
 }
 
+static bool _housing_portal_state_at(const coord_def &pos)
+{
+    if (env.grid(pos) == DNGN_ENTER_PORTAL_VAULT)
+        return true;
+    for (map_marker *marker : env.markers.get_markers_at(pos))
+        if (!marker->property(HOUSING_PORTAL_TARGET_KEY).empty())
+            return true;
+    return false;
+}
+
+static bool _remove_housing_portal(const coord_def &pos)
+{
+    if (!_portal_target_at(pos, nullptr)
+        || (actor_at(pos) && pos != you.pos())
+        || env.igrid(pos) != NON_ITEM || housing_is_spawn(pos))
+    {
+        mpr("That Housing portal cannot be removed safely.");
+        return false;
+    }
+
+    map_marker *marker = env.markers.get_markers_at(pos).front();
+    env.markers.remove(marker);
+    _clear_housing_cell_to_floor(pos);
+    mpr("The Housing portal is removed.");
+    return true;
+}
+
 static bool _remove_housing_shop(const coord_def &pos)
 {
     const dungeon_feature_type feat = env.grid(pos);
@@ -1744,21 +1823,24 @@ bool housing_clear_terrain(const coord_def &pos)
         return false;
 
     housing_ensure_level();
+    const bool items_cleared = _clear_housing_items(pos);
     vector<coord_def> spawns = _stored_spawns();
     if (std::find(spawns.begin(), spawns.end(), pos) != spawns.end())
-        return _remove_housing_spawn(pos, spawns);
+        return _remove_housing_spawn(pos, spawns) || items_cleared;
     if (_visitor_wall_marker_at(pos))
-        return _remove_housing_visitor_wall(pos);
+        return _remove_housing_visitor_wall(pos) || items_cleared;
+    if (_housing_portal_state_at(pos))
+        return _remove_housing_portal(pos) || items_cleared;
     if (env.grid(pos) == DNGN_ENTER_SHOP
         || env.grid(pos) == DNGN_ABANDONED_SHOP
         || env.shop.find(pos) != env.shop.end())
     {
-        return _remove_housing_shop(pos);
+        return _remove_housing_shop(pos) || items_cleared;
     }
     if (!housing_can_edit(pos))
     {
         mpr("That square is protected in Housing.");
-        return false;
+        return items_cleared;
     }
 
     _clear_housing_cell_to_floor(pos);
@@ -2008,9 +2090,12 @@ bool housing_monster_type_allowed(monster_type type)
 bool housing_monster_is_owner_inert(const monster &mons)
 {
     return housing_is_owner() && mons.alive()
-        && mons.props.exists(HOUSING_MONSTER_KEY)
-        && mons.props[HOUSING_MONSTER_KEY].get_type() == SV_BOOL
-        && mons.props[HOUSING_MONSTER_KEY].get_bool();
+        && _housing_created_monster(mons);
+}
+
+bool housing_monster_was_created(const monster &mons)
+{
+    return _housing_created_monster(mons);
 }
 
 bool housing_create_monster()
@@ -2102,6 +2187,16 @@ bool housing_create_monster()
         return false;
     }
     created->props[HOUSING_MONSTER_KEY] = true;
+    created->props[NEVER_CORPSE_KEY] = true;
+    // Treat only equipment generated as part of this editor action as
+    // disposable. A monster that later acquires a real player item will still
+    // drop it normally. Preserve unrands: marking one disposable while its
+    // global unique status says it exists would make its lifecycle ambiguous.
+    for (mon_inv_iterator item(*created); item; ++item)
+    {
+        if (!is_unrandom_artefact(*item))
+            item->flags |= ISFLAG_SUMMONED;
+    }
     mprf("%s appears.", created->name(DESC_A).c_str());
     return true;
 }
@@ -3666,9 +3761,8 @@ static bool _housing_monster_can_be_published(const monster &mons)
     return mons.alive()
         && housing_monster_type_allowed(mons.type)
         && testbits(mons.flags, MF_NO_REWARD)
-        && mons.props.exists(HOUSING_MONSTER_KEY)
-        && mons.props[HOUSING_MONSTER_KEY].get_type() == SV_BOOL
-        && mons.props[HOUSING_MONSTER_KEY].get_bool();
+        && _housing_created_monster(mons)
+        && mons.props.exists(NEVER_CORPSE_KEY);
 }
 
 static bool _housing_shop_can_be_published(const coord_def &pos)

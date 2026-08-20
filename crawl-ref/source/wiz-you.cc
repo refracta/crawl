@@ -1127,6 +1127,12 @@ void wizard_xom_acts()
 
 void wizard_set_zot_clock()
 {
+    if (crawl_state.game_is_housing())
+    {
+        mpr("Housing has no Zot clock.");
+        return;
+    }
+
     const int max_zot_clock = MAX_ZOT_CLOCK / BASELINE_DELAY;
 
     string prompt = make_stringf("Enter new Zot clock value "

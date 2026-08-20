@@ -10,6 +10,7 @@
 #include "feature.h"
 #include "files.h"
 #include "housing.h"
+#include "items.h"
 #include "jobs.h"
 #include "losparam.h"
 #include "mapmark.h"
@@ -20,12 +21,14 @@
 #include "package.h"
 #include "player.h"
 #include "state.h"
+#include "status.h"
 #include "tags.h"
 #include "shopping.h"
 #include "unwind.h"
 #include "terrain.h"
 #include "viewgeom.h"
 #include "wizard.h"
+#include "zot.h"
 
 #ifndef TARGET_OS_WINDOWS
 #include <sys/stat.h>
@@ -104,6 +107,7 @@ TEST_CASE("Housing-created monsters are inert only for their owner",
     placed.type = MONS_RAT;
     placed.hit_points = placed.max_hit_points = 1;
     placed.props["housing_created_monster"] = true;
+    REQUIRE(housing_monster_was_created(placed));
 
     unwind_var<game_type> saved_game_type(crawl_state.type,
                                           GAME_TYPE_HOUSING);
@@ -114,6 +118,7 @@ TEST_CASE("Housing-created monsters are inert only for their owner",
 
     crawl_state.type = GAME_TYPE_HOUSING;
     placed.props.erase("housing_created_monster");
+    REQUIRE_FALSE(housing_monster_was_created(placed));
     REQUIRE_FALSE(housing_monster_is_owner_inert(placed));
 }
 
@@ -152,6 +157,57 @@ TEST_CASE("Housing disables explore mode but preserves wizard mode",
     housing_enforce_explore_mode();
     REQUIRE(Options.explore_mode == WIZ_YES);
     REQUIRE(you.explore);
+}
+
+TEST_CASE("Housing has no Zot clock", "[single-file]")
+{
+    const CrawlHashTable saved_properties = you.props;
+    unwinder restore_properties = [saved_properties]() {
+        you.props = saved_properties;
+    };
+    unwind_var<game_type> saved_game_type(crawl_state.type,
+                                          GAME_TYPE_HOUSING);
+    unwind_var<branch_type> saved_branch(you.where_are_you, BRANCH_DUNGEON);
+    unwind_var<int> saved_time_taken(you.time_taken, BASELINE_DELAY);
+    unwind_var<bool> saved_show_zot(Options.always_show_zot, true);
+    unwind_var<int> saved_zigs_completed(you.zigs_completed, 0);
+    unwind_var<game_chapter> saved_chapter(you.chapter,
+                                           CHAPTER_ORB_HUNTING);
+    unwind_var<god_type> saved_religion(you.religion, GOD_NO_GOD);
+
+    you.props.erase("ZOT_AUTS");
+    REQUIRE_FALSE(zot_clock_active());
+    REQUIRE(bezotting_level() == 0);
+    REQUIRE_FALSE(bezotted());
+    REQUIRE_FALSE(should_fear_zot());
+
+    incr_zot_clock();
+    decr_zot_clock();
+    set_turns_until_zot(1);
+    REQUIRE_FALSE(you.props.exists("ZOT_AUTS"));
+
+    // A clock persisted by an old Housing build remains inert rather than
+    // being deleted or silently reset.
+    crawl_state.type = GAME_TYPE_NORMAL;
+    set_turns_until_zot(1234);
+    REQUIRE(you.props.exists("ZOT_AUTS"));
+    REQUIRE(turns_until_zot() == 1234);
+    REQUIRE(zot_clock_active());
+    incr_zot_clock();
+    REQUIRE(turns_until_zot() == 1233);
+    set_turns_until_zot(1234);
+    crawl_state.type = GAME_TYPE_HOUSING;
+    REQUIRE(gem_clock_active());
+    incr_zot_clock();
+    decr_zot_clock();
+    set_turns_until_zot(1);
+    REQUIRE(turns_until_zot() == 1234);
+
+    status_info zot_status;
+    fill_status_info(STATUS_ZOT, zot_status);
+    REQUIRE(zot_status.light_text.empty());
+    REQUIRE(zot_status.short_text.empty());
+    REQUIRE(zot_status.long_text.empty());
 }
 
 TEST_CASE("Housing branch theme ids and menu order are stable",
@@ -577,10 +633,21 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
         REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
 
-        REQUIRE_FALSE(housing_clear_terrain(template_spawn));
+        item_def gold;
+        gold.clear();
+        gold.base_type = OBJ_GOLD;
+        gold.quantity = 1;
+        const int gold_index = copy_item_to_grid(gold, template_spawn);
+        REQUIRE(gold_index != NON_ITEM);
+
+        // Clear still destroys the selected stack even though the final spawn
+        // fixture itself must remain protected.
+        REQUIRE(housing_clear_terrain(template_spawn));
+        REQUIRE_FALSE(env.item[gold_index].defined());
         REQUIRE(housing_is_spawn(template_spawn));
         REQUIRE(env.grid(template_spawn) == DNGN_RUNELIGHT);
         REQUIRE(env.markers.get_markers_at(template_spawn).size() == 1);
+        REQUIRE_FALSE(housing_clear_terrain(template_spawn));
     }
 
     SECTION("owner-only barrier toggle creates a solid see-through wall")
@@ -608,6 +675,49 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE(housing_toggle_visitor_wall(ambiguous_spawn));
         REQUIRE(housing_clear_terrain(ambiguous_spawn));
         REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
+    }
+
+    SECTION("terrain clear removes a Housing portal and its item stack")
+    {
+        housing_ensure_level(false);
+        REQUIRE(housing_create_portal(ambiguous_spawn, "Owner:main"));
+        REQUIRE(housing_portal_is_valid(ambiguous_spawn));
+
+        item_def gold;
+        gold.clear();
+        gold.base_type = OBJ_GOLD;
+        gold.quantity = 7;
+        const int gold_index = copy_item_to_grid(gold, ambiguous_spawn);
+        REQUIRE(gold_index != NON_ITEM);
+
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE_FALSE(env.item[gold_index].defined());
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
+        REQUIRE_FALSE(housing_portal_is_valid(ambiguous_spawn));
+    }
+
+    SECTION("terrain clear preserves a malformed portal fail closed")
+    {
+        housing_ensure_level(false);
+        env.grid(ambiguous_spawn) = DNGN_ENTER_PORTAL_VAULT;
+
+        item_def gold;
+        gold.clear();
+        gold.base_type = OBJ_GOLD;
+        gold.quantity = 3;
+        const int gold_index = copy_item_to_grid(gold, ambiguous_spawn);
+        REQUIRE(gold_index != NON_ITEM);
+
+        // Item clearing is an independent, explicitly destructive operation;
+        // malformed reserved terrain remains fail-closed after its stack is
+        // removed and the successful item mutation is checkpointed.
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE_FALSE(env.item[gold_index].defined());
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_ENTER_PORTAL_VAULT);
+        REQUIRE_FALSE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_ENTER_PORTAL_VAULT);
         REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
     }
 
@@ -668,6 +778,36 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         housing_ensure_level(false);
         env.grid(ambiguous_spawn) = DNGN_STONE_WALL;
         REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+    }
+
+    SECTION("terrain clear removes every item on the selected square")
+    {
+        housing_ensure_level(false);
+
+        item_def skeleton;
+        skeleton.clear();
+        skeleton.base_type = OBJ_CORPSES;
+        skeleton.sub_type = CORPSE_SKELETON;
+        skeleton.quantity = 1;
+        skeleton.mon_type = MONS_RAT;
+        skeleton.orig_monnum = MONS_RAT;
+        const int skeleton_index =
+            copy_item_to_grid(skeleton, ambiguous_spawn);
+        REQUIRE(skeleton_index != NON_ITEM);
+
+        item_def gold;
+        gold.clear();
+        gold.base_type = OBJ_GOLD;
+        gold.sub_type = 0;
+        gold.quantity = 17;
+        const int gold_index = copy_item_to_grid(gold, ambiguous_spawn);
+        REQUIRE(gold_index != NON_ITEM);
+
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE_FALSE(env.item[skeleton_index].defined());
+        REQUIRE_FALSE(env.item[gold_index].defined());
+        REQUIRE(env.igrid(ambiguous_spawn) == NON_ITEM);
         REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
     }
 

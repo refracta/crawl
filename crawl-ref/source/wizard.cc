@@ -432,7 +432,7 @@ int list_wizard_commands(bool do_redraw_screen)
     // 2 columns
     column_composer cols(2, 44);
     cols.add_formatted(0,
-                       "<yellow>Player stats</yellow>\n"
+                       string("<yellow>Player stats</yellow>\n"
                        "<w>A</w>      set all skills to level\n"
                        "<w>Ctrl-D</w> change enchantments/durations\n"
                        "<w>g</w>      exercise a skill\n"
@@ -451,8 +451,10 @@ int list_wizard_commands(bool do_redraw_screen)
                        "<w>@</w>      set Str Int Dex\n"
                        "<w>#</w>      load character from a dump file\n"
                        "<w>&</w>      list all divine followers\n"
-                       "<w>=</w>      show info about skill points\n"
-                       "<w>n</w>      set Zot clock to a value\n"
+                       "<w>=</w>      show info about skill points\n")
+                       + (crawl_state.game_is_housing()
+                          ? "" : "<w>n</w>      set Zot clock to a value\n")
+                       +
                        "<w>N</w>      get current tension value\n"
                        "<w>j</w>      reset single-use god abilities\n"
                        "\n"
