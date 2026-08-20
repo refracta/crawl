@@ -180,6 +180,9 @@ namespace quiver
     void on_item_pickup(int slot);
     void on_newchar();
 
+    // Remove current and historical references to player inventory slots.
+    void clear_inventory_references();
+
     // TODO: perhaps this should be rolled into action_cycler?
     class ammo_history
     {

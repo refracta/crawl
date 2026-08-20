@@ -32,6 +32,7 @@
 #include "shopping.h"
 #include "unwind.h"
 #include "terrain.h"
+#include "tile-env.h"
 #include "viewgeom.h"
 #include "wizard.h"
 #include "zot.h"
@@ -548,18 +549,21 @@ TEST_CASE("Housing ability ids remain append-only", "[single-file]")
     REQUIRE(static_cast<int>(ABIL_HOUSING_TRAVEL_TO_MAP) == 9009);
     REQUIRE(static_cast<int>(ABIL_HOUSING_TOGGLE_VISITOR_WALL) == 9010);
     REQUIRE(static_cast<int>(ABIL_HOUSING_MANAGE_SPAWNS) == 9011);
+    REQUIRE(static_cast<int>(ABIL_HOUSING_CREATE_VISITOR_STRIP) == 9012);
+    REQUIRE(ABIL_LAST_HOUSING == ABIL_HOUSING_CREATE_VISITOR_STRIP);
 }
 
 TEST_CASE("Housing snapshot schema is explicit and backwards compatible",
           "[single-file]")
 {
-    REQUIRE(housing_snapshot_schema_version() == 4);
+    REQUIRE(housing_snapshot_schema_version() == 5);
     REQUIRE(housing_snapshot_schema_supported(1));
     REQUIRE(housing_snapshot_schema_supported(2));
     REQUIRE(housing_snapshot_schema_supported(3));
     REQUIRE(housing_snapshot_schema_supported(4));
+    REQUIRE(housing_snapshot_schema_supported(5));
     REQUIRE_FALSE(housing_snapshot_schema_supported(0));
-    REQUIRE_FALSE(housing_snapshot_schema_supported(5));
+    REQUIRE_FALSE(housing_snapshot_schema_supported(6));
     REQUIRE_FALSE(housing_snapshot_schema_supported(INT_MAX));
 }
 
@@ -641,6 +645,7 @@ struct housing_wall_cell_fixture
     {
         auto *marker = new map_wiz_props_marker(pos);
         marker->set_property("housing_visitor_wall", "yes");
+        marker->set_property("feature_description", "owner-only barrier");
         if (veto)
             marker->set_property("veto_destroy", "veto");
         env.markers.add(marker);
@@ -724,6 +729,14 @@ TEST_CASE("Housing visitor wall requires exact marker and terrain pairing",
         REQUIRE_FALSE(housing_visitor_wall_is_valid(pos));
         REQUIRE_THROWS(housing_open_visitor_wall(pos));
     }
+
+    SECTION("an extra wizard property fails closed")
+    {
+        map_wiz_props_marker *marker = cell.add_wall_marker();
+        marker->set_property("post_init_remove", "yes");
+        REQUIRE_FALSE(housing_visitor_wall_is_valid(pos));
+        REQUIRE_THROWS(housing_open_visitor_wall(pos));
+    }
 }
 
 TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
@@ -733,6 +746,7 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
     const coord_def old_start(20, 20);
     const coord_def template_spawn(21, 20);
     const coord_def ambiguous_spawn(22, 20);
+    const coord_def third_passage(23, 20);
     unwind_var<game_type> saved_game_type(crawl_state.type,
                                           GAME_TYPE_HOUSING);
     unwind_var<bool> saved_on_level(you.on_current_level, true);
@@ -746,56 +760,126 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
     const dungeon_feature_type old_spawn_feat = env.grid(template_spawn);
     const dungeon_feature_type old_ambiguous_feat =
         env.grid(ambiguous_spawn);
+    const dungeon_feature_type old_third_feat = env.grid(third_passage);
     const unsigned short old_start_monster = env.mgrid(old_start);
     const unsigned short old_spawn_monster = env.mgrid(template_spawn);
     const unsigned short old_ambiguous_monster =
         env.mgrid(ambiguous_spawn);
+    const unsigned short old_third_monster = env.mgrid(third_passage);
     const int old_start_item = env.igrid(old_start);
     const int old_spawn_item = env.igrid(template_spawn);
     const int old_ambiguous_item = env.igrid(ambiguous_spawn);
+    const int old_third_item = env.igrid(third_passage);
+    const tile_flavour old_start_flavour = tile_env.flv(old_start);
+    const tile_flavour old_spawn_flavour = tile_env.flv(template_spawn);
+    const tile_flavour old_ambiguous_flavour =
+        tile_env.flv(ambiguous_spawn);
+    const tile_flavour old_third_flavour = tile_env.flv(third_passage);
+    const vector<string> old_tile_names = tile_env.names;
+    const map_cell old_start_knowledge = env.map_knowledge(old_start);
+    const map_cell old_spawn_knowledge = env.map_knowledge(template_spawn);
+    const map_cell old_ambiguous_knowledge =
+        env.map_knowledge(ambiguous_spawn);
+    const map_cell old_third_knowledge = env.map_knowledge(third_passage);
+    const tileidx_t old_start_remembered =
+        tile_env.remembered_flavour.feat_flavour(old_start);
+    const tileidx_t old_spawn_remembered =
+        tile_env.remembered_flavour.feat_flavour(template_spawn);
+    const tileidx_t old_ambiguous_remembered =
+        tile_env.remembered_flavour.feat_flavour(ambiguous_spawn);
+    const tileidx_t old_third_remembered =
+        tile_env.remembered_flavour.feat_flavour(third_passage);
+    const unsigned short old_start_remembered_idx =
+        tile_env.remembered_flavour.feat_flavour_idx(old_start);
+    const unsigned short old_spawn_remembered_idx =
+        tile_env.remembered_flavour.feat_flavour_idx(template_spawn);
+    const unsigned short old_ambiguous_remembered_idx =
+        tile_env.remembered_flavour.feat_flavour_idx(ambiguous_spawn);
+    const unsigned short old_third_remembered_idx =
+        tile_env.remembered_flavour.feat_flavour_idx(third_passage);
+    const unsigned short old_start_colour = env.grid_colours(old_start);
+    const unsigned short old_spawn_colour = env.grid_colours(template_spawn);
+    const unsigned short old_ambiguous_colour =
+        env.grid_colours(ambiguous_spawn);
+    const unsigned short old_third_colour = env.grid_colours(third_passage);
     vector<map_marker*> old_start_markers;
     vector<map_marker*> old_spawn_markers;
     vector<map_marker*> old_ambiguous_markers;
+    vector<map_marker*> old_third_markers;
     for (map_marker *marker : env.markers.get_markers_at(old_start))
         old_start_markers.push_back(marker->clone());
     for (map_marker *marker : env.markers.get_markers_at(template_spawn))
         old_spawn_markers.push_back(marker->clone());
     for (map_marker *marker : env.markers.get_markers_at(ambiguous_spawn))
         old_ambiguous_markers.push_back(marker->clone());
+    for (map_marker *marker : env.markers.get_markers_at(third_passage))
+        old_third_markers.push_back(marker->clone());
     unwinder restore_cells = [&]() {
         env.markers.remove_markers_at(old_start);
         env.markers.remove_markers_at(template_spawn);
         env.markers.remove_markers_at(ambiguous_spawn);
+        env.markers.remove_markers_at(third_passage);
         for (map_marker *marker : old_start_markers)
             env.markers.add(marker);
         for (map_marker *marker : old_spawn_markers)
             env.markers.add(marker);
         for (map_marker *marker : old_ambiguous_markers)
             env.markers.add(marker);
+        for (map_marker *marker : old_third_markers)
+            env.markers.add(marker);
         env.grid(old_start) = old_start_feat;
         env.grid(template_spawn) = old_spawn_feat;
         env.grid(ambiguous_spawn) = old_ambiguous_feat;
+        env.grid(third_passage) = old_third_feat;
         env.mgrid(old_start) = old_start_monster;
         env.mgrid(template_spawn) = old_spawn_monster;
         env.mgrid(ambiguous_spawn) = old_ambiguous_monster;
+        env.mgrid(third_passage) = old_third_monster;
         env.igrid(old_start) = old_start_item;
         env.igrid(template_spawn) = old_spawn_item;
         env.igrid(ambiguous_spawn) = old_ambiguous_item;
+        env.igrid(third_passage) = old_third_item;
+        tile_env.flv(old_start) = old_start_flavour;
+        tile_env.flv(template_spawn) = old_spawn_flavour;
+        tile_env.flv(ambiguous_spawn) = old_ambiguous_flavour;
+        tile_env.flv(third_passage) = old_third_flavour;
+        tile_env.names = old_tile_names;
+        env.map_knowledge(old_start) = old_start_knowledge;
+        env.map_knowledge(template_spawn) = old_spawn_knowledge;
+        env.map_knowledge(ambiguous_spawn) = old_ambiguous_knowledge;
+        env.map_knowledge(third_passage) = old_third_knowledge;
+        tile_env.remembered_flavour.set_feat_flavour(
+            old_start, old_start_remembered, old_start_remembered_idx);
+        tile_env.remembered_flavour.set_feat_flavour(
+            template_spawn, old_spawn_remembered, old_spawn_remembered_idx);
+        tile_env.remembered_flavour.set_feat_flavour(
+            ambiguous_spawn, old_ambiguous_remembered,
+            old_ambiguous_remembered_idx);
+        tile_env.remembered_flavour.set_feat_flavour(
+            third_passage, old_third_remembered, old_third_remembered_idx);
+        env.grid_colours(old_start) = old_start_colour;
+        env.grid_colours(template_spawn) = old_spawn_colour;
+        env.grid_colours(ambiguous_spawn) = old_ambiguous_colour;
+        env.grid_colours(third_passage) = old_third_colour;
     };
 
     env.properties.erase("housing_spawn_points");
     env.markers.remove_markers_at(old_start);
     env.markers.remove_markers_at(template_spawn);
     env.markers.remove_markers_at(ambiguous_spawn);
+    env.markers.remove_markers_at(third_passage);
     env.grid(old_start) = DNGN_FLOOR;
     env.grid(template_spawn) = DNGN_RUNELIGHT;
     env.grid(ambiguous_spawn) = DNGN_FLOOR;
+    env.grid(third_passage) = DNGN_FLOOR;
     env.mgrid(old_start) = NON_MONSTER;
     env.mgrid(template_spawn) = NON_MONSTER;
     env.mgrid(ambiguous_spawn) = NON_MONSTER;
+    env.mgrid(third_passage) = NON_MONSTER;
     env.igrid(old_start) = NON_ITEM;
     env.igrid(template_spawn) = NON_ITEM;
     env.igrid(ambiguous_spawn) = NON_ITEM;
+    env.igrid(third_passage) = NON_ITEM;
     crawl_view.set_player_at(old_start);
     REQUIRE(cloud_at(template_spawn) == nullptr);
 
@@ -952,6 +1036,131 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
         REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
         REQUIRE_FALSE(housing_portal_is_valid(ambiguous_spawn));
+    }
+
+    SECTION("named Housing passages persist and route matching pairs")
+    {
+        housing_ensure_level(false);
+        you.position = template_spawn;
+        crawl_view.set_player_at(template_spawn);
+
+        REQUIRE(housing_create_portal(old_start, "gallery_1"));
+        REQUIRE(housing_create_portal(ambiguous_spawn, "gallery_1"));
+        REQUIRE(housing_local_portal_is_valid(old_start));
+        REQUIRE(housing_local_portal_is_valid(ambiguous_spawn));
+        REQUIRE(env.grid(old_start) == DNGN_STONE_ARCH);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_STONE_ARCH);
+
+        coord_def destination;
+        REQUIRE(housing_local_portal_destination(old_start, destination));
+        REQUIRE(destination == ambiguous_spawn);
+        REQUIRE(housing_local_portal_is_valid(old_start));
+        REQUIRE(housing_local_portal_is_valid(ambiguous_spawn));
+
+        // Removing one endpoint leaves the singleton authenticated but inert.
+        REQUIRE(housing_clear_terrain(old_start));
+        REQUIRE(env.grid(old_start) == DNGN_FLOOR);
+        REQUIRE_FALSE(housing_local_portal_destination(ambiguous_spawn,
+                                                       destination));
+        REQUIRE(housing_local_portal_is_valid(ambiguous_spawn));
+    }
+
+    SECTION("different named Housing passages never mix")
+    {
+        housing_ensure_level(false);
+        you.position = template_spawn;
+        crawl_view.set_player_at(template_spawn);
+
+        REQUIRE(housing_create_portal(old_start, "north"));
+        REQUIRE(housing_create_portal(ambiguous_spawn, "south"));
+        coord_def destination;
+        REQUIRE_FALSE(housing_local_portal_destination(old_start,
+                                                       destination));
+    }
+
+    SECTION("three matching passage endpoints choose another endpoint")
+    {
+        housing_ensure_level(false);
+        you.position = template_spawn;
+        crawl_view.set_player_at(template_spawn);
+
+        REQUIRE(housing_create_portal(old_start, "hub"));
+        REQUIRE(housing_create_portal(ambiguous_spawn, "hub"));
+        REQUIRE(housing_create_portal(third_passage, "hub"));
+        for (int attempt = 0; attempt < 12; ++attempt)
+        {
+            coord_def destination;
+            REQUIRE(housing_local_portal_destination(old_start,
+                                                     destination));
+            REQUIRE((destination == ambiguous_spawn
+                     || destination == third_passage));
+        }
+        REQUIRE(housing_local_portal_is_valid(old_start));
+        REQUIRE(housing_local_portal_is_valid(ambiguous_spawn));
+        REQUIRE(housing_local_portal_is_valid(third_passage));
+    }
+
+    SECTION("visitor inventory tiles are exact fixtures removable by Clear")
+    {
+        housing_ensure_level(false);
+        REQUIRE(housing_create_visitor_strip(ambiguous_spawn));
+        REQUIRE(housing_visitor_strip_is_valid(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_TRANSPORTER_LANDING);
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
+        REQUIRE_FALSE(housing_visitor_strip_is_valid(ambiguous_spawn));
+    }
+
+    SECTION("conflicting new fixture roles fail closed")
+    {
+        housing_ensure_level(false);
+        REQUIRE(housing_create_portal(ambiguous_spawn, "gallery"));
+        vector<map_marker*> markers =
+            env.markers.get_markers_at(ambiguous_spawn);
+        REQUIRE(markers.size() == 1);
+        auto *wiz = static_cast<map_wiz_props_marker *>(markers.front());
+        wiz->set_property("housing_visitor_strip", "yes");
+        REQUIRE_FALSE(housing_local_portal_is_valid(ambiguous_spawn));
+        REQUIRE_FALSE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_STONE_ARCH);
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).size() == 1);
+    }
+
+    SECTION("malformed passage markers never fall through to native traps")
+    {
+        housing_ensure_level(false);
+        you.position = template_spawn;
+        crawl_view.set_player_at(template_spawn);
+        REQUIRE(housing_create_portal(ambiguous_spawn, "broken"));
+
+        env.grid(ambiguous_spawn) = DNGN_PASSAGE_OF_GOLUBRIA;
+        REQUIRE_FALSE(housing_local_portal_is_valid(ambiguous_spawn));
+        you.position = ambiguous_spawn;
+        crawl_view.set_player_at(ambiguous_spawn);
+        REQUIRE(housing_movement_fixture_is_reserved(ambiguous_spawn));
+        REQUIRE(housing_trigger_local_portal(you));
+        REQUIRE(you.pos() == ambiguous_spawn);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_PASSAGE_OF_GOLUBRIA);
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).size() == 1);
+    }
+
+    SECTION("malformed strip markers never fall through to native traps")
+    {
+        housing_ensure_level(false);
+        you.position = template_spawn;
+        crawl_view.set_player_at(template_spawn);
+        REQUIRE(housing_create_visitor_strip(ambiguous_spawn));
+
+        env.grid(ambiguous_spawn) = DNGN_TRAP_DISPERSAL;
+        REQUIRE_FALSE(housing_visitor_strip_is_valid(ambiguous_spawn));
+        you.position = ambiguous_spawn;
+        crawl_view.set_player_at(ambiguous_spawn);
+        REQUIRE(housing_movement_fixture_is_reserved(ambiguous_spawn));
+        REQUIRE(housing_trigger_visitor_strip(you));
+        REQUIRE(you.pos() == ambiguous_spawn);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_TRAP_DISPERSAL);
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).size() == 1);
     }
 
     SECTION("terrain clear preserves a malformed portal fail closed")

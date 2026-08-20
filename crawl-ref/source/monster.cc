@@ -39,6 +39,7 @@
 #include "god-conduct.h"
 #include "god-item.h"
 #include "god-passive.h"
+#include "housing.h"
 #include "item-name.h"
 #include "item-prop.h"
 #include "item-status-flag-type.h"
@@ -5613,8 +5614,14 @@ void monster::finalise_movement(const actor* to_blame)
     if (cloud && cloud->type == CLOUD_BLASTMOTES)
         explode_blastmotes_at(pos()); // schedules a fineff, so won't kill
 
-    if (env.grid(pos()) == DNGN_BINDING_SIGIL)
+    const bool reserved_housing_movement_fixture =
+        last_move_pos != pos()
+        && housing_movement_fixture_is_reserved(pos());
+    if (!reserved_housing_movement_fixture
+        && env.grid(pos()) == DNGN_BINDING_SIGIL)
+    {
         trigger_binding_sigil(*this);
+    }
 
     terrain_property_t &prop = env.pgrid(pos());
     if (prop & FPROP_BLOODY)
@@ -5697,9 +5704,26 @@ void monster::finalise_movement(const actor* to_blame)
             return;
     }
 
+    // Activate persistent Housing movement fixtures at the same late point as
+    // native traps, after deliberate-movement effects such as barbs and sticky
+    // flame have been applied exactly once.
+    const coord_def housing_passage_source = pos();
+    const bool handled_housing_passage = last_move_pos != pos()
+        && !(last_move_flags & MV_GOLUBRIA)
+        && housing_trigger_local_portal(*this);
+    if (pos() != housing_passage_source)
+    {
+        clear_deferred_move();
+        return;
+    }
+    const bool handled_housing_strip = !handled_housing_passage
+        && last_move_pos != pos()
+        && housing_trigger_visitor_strip(*this);
+
     // Trigger traps last (since they could cause movement that might affect
     // some of the rest of this).
-    if (last_move_pos != pos() && feat_is_trap(env.grid(pos()))
+    if (!handled_housing_passage && !handled_housing_strip
+        && last_move_pos != pos() && feat_is_trap(env.grid(pos()))
         && (env.grid(pos()) != DNGN_PASSAGE_OF_GOLUBRIA || !(last_move_flags & MV_GOLUBRIA)))
     {
         trigger_trap(*this);

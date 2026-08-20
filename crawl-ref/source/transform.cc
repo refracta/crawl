@@ -2208,9 +2208,19 @@ bool transform(int dur, transformation which_trans, bool involuntary,
  * @param new_form       If this untransform is being done in the process of
  *                       entering a new form, what form is that?
  */
-void untransform(bool skip_move, bool scale_hp, bool preserve_equipment,
-                 transformation new_form)
+enum class untransform_reason
 {
+    normal,
+    housing_inventory_destruction,
+};
+
+static void _untransform(bool skip_move, bool scale_hp,
+                         bool preserve_equipment, transformation new_form,
+                         untransform_reason reason)
+{
+    const bool destroying_housing_inventory =
+        reason == untransform_reason::housing_inventory_destruction;
+
     // Skip if there's nothing that needs doing.
     if (you.form == transformation::none)
         return;
@@ -2222,7 +2232,7 @@ void untransform(bool skip_move, bool scale_hp, bool preserve_equipment,
         you.received_weapon_warning = false;
 
     const string message = get_form(old_form)->get_untransform_message();
-    if (!message.empty())
+    if (!message.empty() && !destroying_housing_inventory)
         mprf(MSGCH_DURATION, "%s", message.c_str());
 
     set_form(transformation::none, 0, scale_hp);
@@ -2237,10 +2247,17 @@ void untransform(bool skip_move, bool scale_hp, bool preserve_equipment,
         notify_stat_change(STAT_DEX, -dex_mod, true);
 
     // This will keep merfolk boots melded, if mertail is currently active.
-    you.equipment.unmeld_all_equipment();
+    // When the whole inventory is about to be destroyed, leaving the meld
+    // flags in place also avoids replaying effects for equipment which was
+    // already inactive in the old form.
+    if (!destroying_housing_inventory)
+        you.equipment.unmeld_all_equipment();
 
-    if (old_form == transformation::fortress_crab)
+    if (old_form == transformation::fortress_crab
+        && !destroying_housing_inventory)
+    {
         you.equipment.shift_twohander_to_slot(SLOT_OFFHAND);
+    }
 
     // Update regarding talisman properties, just in case we didn't actually
     // meld or unmeld anything.
@@ -2284,10 +2301,15 @@ void untransform(bool skip_move, bool scale_hp, bool preserve_equipment,
     // make them fall off. If they're entering a temporary form, meld them.
     // If they're returning back to the form that granted those slots in the
     // first place, do nothing.
-    vector<item_def*> forced_remove = you.equipment.get_forced_removal_list(true);
-    if (preserve_equipment && new_form != you.default_form)
+    vector<item_def*> forced_remove;
+    if (!destroying_housing_inventory)
+        forced_remove = you.equipment.get_forced_removal_list(true);
+    if (!destroying_housing_inventory
+        && preserve_equipment && new_form != you.default_form)
+    {
         you.equipment.meld_equipment(forced_remove);
-    else if (!preserve_equipment)
+    }
+    else if (!destroying_housing_inventory && !preserve_equipment)
     {
         for (item_def* item : forced_remove)
         {
@@ -2300,11 +2322,15 @@ void untransform(bool skip_move, bool scale_hp, bool preserve_equipment,
 
     // Update skill boosts for the current state of equipment melds
     // Must happen before the HP check!
-    ash_check_bondage();
+    if (!destroying_housing_inventory)
+        ash_check_bondage();
 
     // Not necessary for proper functioning, but printing a message feels appropriate.
-    if (get_form(old_form)->forbids_flight() && you.airborne())
+    if (!destroying_housing_inventory
+        && get_form(old_form)->forbids_flight() && you.airborne())
+    {
         float_player();
+    }
 
     if (!skip_move)
     {
@@ -2322,7 +2348,7 @@ void untransform(bool skip_move, bool scale_hp, bool preserve_equipment,
         init_player_doll();
 #endif
 
-    if (you.hp <= 0)
+    if (you.hp <= 0 && !destroying_housing_inventory)
     {
         ouch(0, KILLED_BY_FRAILTY, MID_NOBODY,
              make_stringf("losing the %s form",
@@ -2339,18 +2365,28 @@ void untransform(bool skip_move, bool scale_hp, bool preserve_equipment,
 
     // Called so that artprop flight on talismans specifically ends properly.
     // (Won't land the player if anything else is keeping them afloat.)
-    if (was_flying)
+    if (was_flying && !destroying_housing_inventory)
         land_player();
 
     you.turn_is_over = true;
     if (you.transform_uncancellable)
         you.transform_uncancellable = false;
 
-    if (old_form == transformation::slaughter)
+    if (old_form == transformation::slaughter
+        && !destroying_housing_inventory)
+    {
         makhleb_enter_crucible_of_flesh(15);
+    }
 
     if (old_form == transformation::sphinx)
         riddle_targs.clear();
+}
+
+void untransform(bool skip_move, bool scale_hp, bool preserve_equipment,
+                 transformation new_form)
+{
+    _untransform(skip_move, scale_hp, preserve_equipment, new_form,
+                 untransform_reason::normal);
 }
 
 void return_to_default_form(bool new_form)
@@ -2467,6 +2503,35 @@ void set_default_form(transformation t, const item_def *talisman)
     }
 
     you.default_form = t;
+}
+
+void clear_active_talisman_for_housing_inventory_destruction()
+{
+    if (you.cur_talisman < 0)
+        return;
+
+    ASSERT_RANGE(you.cur_talisman, 0, ENDOFPACK);
+
+    const transformation talisman_form = you.default_form;
+    const bool end_current_form = talisman_form != transformation::none
+                                  && you.form == talisman_form;
+
+    // Drop the talisman's cached artefact properties before changing form.
+    // The caller still owns the item and performs its non-punitive artefact
+    // cleanup before finally destroying the inventory slot.
+    you.cur_talisman = -1;
+    you.equipment.update();
+
+    if (end_current_form)
+    {
+        _untransform(true, false, false, transformation::none,
+                     untransform_reason::housing_inventory_destruction);
+    }
+
+    // A temporary form may be layered over the talisman form. Preserve that
+    // unrelated transformation, but make it return to no default form later.
+    you.default_form = transformation::none;
+    you.equipment.update();
 }
 
 transformation form_for_talisman(const item_def &talisman)

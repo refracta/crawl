@@ -13,6 +13,7 @@
 #include "monster-type.h"
 
 class package;
+class actor;
 class monster;
 
 using std::string;
@@ -39,10 +40,10 @@ const string &housing_current_map_id();
 // owner maps and visitor destinations.
 string housing_place();
 
-// Public snapshot compatibility is deliberately explicit: schema 4 is the
-// current capability for translucent owner-only barriers, while barrier-free
-// maps remain schema 3 for rolling-process compatibility. Readers retain all
-// three strictly validated legacy formats used by published Housing maps.
+// Public snapshot compatibility is deliberately explicit: schema 4 adds
+// translucent owner-only barriers and schema 5 adds named passages plus
+// visitor inventory tiles. Maps without those capabilities remain schema 3
+// during rolling deployment; readers retain every validated prior format.
 int housing_snapshot_schema_version();
 bool housing_snapshot_schema_supported(int schema);
 
@@ -104,7 +105,33 @@ bool housing_feature_allowed(dungeon_feature_type feat);
 dungeon_feature_type housing_last_feature();
 void housing_set_last_feature(dungeon_feature_type feat);
 bool housing_valid_map_target(const string &target);
+// Create either an account:map travel portal or, when target contains no
+// colon, a persistent same-level passage named with the map-id rules.
 bool housing_create_portal(const coord_def &pos, const string &target);
+bool housing_create_local_portal(const coord_def &pos,
+                                 const string &portal_name);
+bool housing_local_portal_is_valid(const coord_def &pos);
+// Choose an unoccupied endpoint with the same authenticated name. The
+// optional flag distinguishes a fully occupied group from a singleton.
+bool housing_local_portal_destination(const coord_def &source,
+                                      coord_def &destination,
+                                      bool *occupied = nullptr);
+// Handle a marked same-level passage. Returning true means that the source
+// cell was a Housing fixture (including malformed or currently blocked ones)
+// and callers must not apply unrelated terrain behaviour.
+bool housing_trigger_local_portal(actor &triggerer);
+// Place and validate the owner-authored tile which destroys only a visitor
+// capsule's carried inventory. The owner and the published level are never
+// mutated by triggering it.
+bool housing_create_visitor_strip(const coord_def &pos);
+bool housing_visitor_strip_is_valid(const coord_def &pos);
+// Whether this square carries either reserved movement-fixture state. Callers
+// use this before ordinary sigil/trap handling so malformed fixtures remain
+// inert instead of falling through to unrelated native effects.
+bool housing_movement_fixture_is_reserved(const coord_def &pos);
+// Return true whenever the entered cell is reserved for this Housing fixture,
+// including owner/monster no-ops and malformed fail-closed states.
+bool housing_trigger_visitor_strip(actor &triggerer);
 // Prompt for a plain monster name, then choose an explicit target cell and
 // create one persistable, no-reward Housing monster. Map-definition specs and
 // unsafe derived actors are rejected, and target invariants are rechecked at

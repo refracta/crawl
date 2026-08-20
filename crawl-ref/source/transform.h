@@ -353,6 +353,11 @@ void untransform(bool skip_move = false, bool scale_hp = true,
 void unset_default_form();
 void set_default_form(transformation t, const item_def *talisman);
 
+// Detach an active talisman before a Housing visitor's inventory is destroyed.
+// If its default form is currently active, the form ends without ordinary
+// transition side effects (notably entering the Crucible from Slaughter form).
+void clear_active_talisman_for_housing_inventory_destruction();
+
 void set_form(transformation which_trans, int dur, bool scale_hp = true);
 void return_to_default_form(bool new_form = false);
 

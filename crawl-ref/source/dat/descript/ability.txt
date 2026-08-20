@@ -1113,3 +1113,25 @@ always perform a Howl afterward.
 
 Can only target an enemy who is afraid, and who has at least one occupiable tile
 adjacent to them.
+%%%%
+Create a housing portal ability
+
+Places a permanent Housing fixture. Enter an account:map destination to create
+a portal to another Housing map, or target an empty ordinary floor and enter a
+portal_name (using the same letters, digits, underscores, and length rules as a
+Housing map name) to create a passage within the current map.
+
+Two passages with the same name lead to one another. If more than two share a
+name, entering one chooses another unoccupied endpoint at random. A lone
+endpoint remains inert until another endpoint with the same name is placed.
+Clear housing terrain can remove any endpoint.
+%%%%
+Place a visitor inventory strip ability
+
+Places a permanent tile on an empty Housing floor square. When a visitor steps
+onto it, every equipped and carried item in that disposable visit is destroyed
+without normal equipment-removal penalties. The owner and monsters are not
+affected, ground items remain, and Return home restores the visitor's canonical
+character and original inventory.
+
+Clear housing terrain can remove the tile.

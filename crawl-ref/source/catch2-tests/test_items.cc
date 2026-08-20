@@ -184,6 +184,34 @@ TEST_CASE_METHOD( MockPlayerYouTestsFixture,
     REQUIRE(you.base_ac(100) == 1200);
 }
 
+TEST_CASE_METHOD(MockPlayerYouTestsFixture,
+                 "Housing inventory destruction clears equipment and quiver",
+                 "[housing][items]") {
+    item_def dagger = simple_create_item(OBJ_WEAPONS, WPN_DAGGER);
+    dagger.brand = SPWPN_DISTORTION;
+    find_and_equip_exact_item(dagger);
+
+    make_and_equip_item(OBJ_ARMOUR, ARM_SCALE_MAIL);
+
+    item_def stone = simple_create_item(OBJ_MISSILES, MI_STONE);
+    move_item_to_inv(stone);
+    const int stone_slot = find_inv_index_with_exact_item(OBJ_MISSILES,
+                                                           MI_STONE);
+    REQUIRE(stone_slot >= 0);
+    you.quiver_action.set_from_slot(stone_slot);
+
+    REQUIRE_FALSE(you.equipment.items.empty());
+    REQUIRE_FALSE(you.quiver_action.is_empty());
+
+    REQUIRE(destroy_player_inventory_for_housing());
+
+    REQUIRE(you.equipment.items.empty());
+    REQUIRE(you.quiver_action.is_empty());
+    REQUIRE_FALSE(you.banished);
+    for (const item_def& item : you.inv)
+        REQUIRE_FALSE(item.defined());
+}
+
 TEST_CASE("armour_prop_test", "[single-file]"){
     REQUIRE(armour_prop(ARM_SCALE_MAIL, PARM_AC) == 6);
 }

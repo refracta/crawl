@@ -45,6 +45,7 @@
 #include "god-wrath.h"
 #include "hints.h"
 #include "hiscores.h"
+#include "housing.h"
 #include "invent.h"
 #include "item-prop.h"
 #include "items.h"
@@ -879,15 +880,36 @@ void player::finalise_movement(const actor* /*to_blame*/)
         if (cloud && cloud->type == CLOUD_BLASTMOTES)
             explode_blastmotes_at(pos()); // schedules a fineff
 
-        if (env.grid(pos()) == DNGN_BINDING_SIGIL)
+        const bool reserved_housing_movement_fixture =
+            housing_movement_fixture_is_reserved(pos());
+
+        if (!reserved_housing_movement_fixture
+            && env.grid(pos()) == DNGN_BINDING_SIGIL)
+        {
             trigger_binding_sigil(you);
+        }
 
         apply_cloud_trail(last_move_pos);
 
+        const bool handled_housing_passage =
+            !(last_move_flags & MV_GOLUBRIA)
+            && housing_trigger_local_portal(you);
+        if (pos() != start_pos)
+        {
+            clear_deferred_move();
+            return;
+        }
+        const bool handled_housing_strip = !handled_housing_passage
+            && housing_trigger_visitor_strip(you);
+
         // Traps go off.
         // (But not when losing flight - i.e., moving into the same tile)
-        if (env.grid(pos()) != DNGN_PASSAGE_OF_GOLUBRIA || !(last_move_flags & MV_GOLUBRIA))
+        if (!handled_housing_passage && !handled_housing_strip
+            && (env.grid(pos()) != DNGN_PASSAGE_OF_GOLUBRIA
+                || !(last_move_flags & MV_GOLUBRIA)))
+        {
             trigger_trap(you);
+        }
 
         // If a trap we triggered moved us, much of the rest of this produces
         // dubious results and should be skipped.

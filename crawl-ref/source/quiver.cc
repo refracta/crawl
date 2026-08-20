@@ -1424,6 +1424,7 @@ namespace quiver
             case ABIL_HOUSING_CLEAR_TERRAIN:
             case ABIL_HOUSING_CREATE_PORTAL:
             case ABIL_HOUSING_MANAGE_SPAWNS:
+            case ABIL_HOUSING_CREATE_VISITOR_STRIP:
                 return true;
             default:
                 return is_dynamic_targeted()
@@ -3117,6 +3118,16 @@ namespace quiver
     {
         // look for something fun to quiver
         you.quiver_action.cycle();
+    }
+
+    void clear_inventory_references()
+    {
+        you.quiver_action = action_cycler();
+        you.m_quiver_history = ammo_history();
+        you.props.erase(QUIVER_MAIN_SAVE_KEY);
+        you.props.erase(QUIVER_LAUNCHER_SAVE_KEY);
+        you.props.erase(LAST_MISSILE_SLOT_KEY);
+        you.redraw_quiver = true;
     }
 }
 

@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -59,6 +60,7 @@
 #include "options.h"
 #include "package.h"
 #include "player.h"
+#include "player-equip.h"
 #include "prompt.h"
 #include "random.h"
 #include "state.h"
@@ -84,6 +86,7 @@
 
 using std::string;
 using std::vector;
+using std::map;
 
 static const char * const HOUSING_SPAWNS_KEY = "housing_spawn_points";
 static const char * const HOUSING_LAST_FEATURE_KEY = "housing_last_feature";
@@ -94,6 +97,10 @@ static const char * const HOUSING_MAP_CHUNK_PREFIX = "housing_map_";
 static const char * const HOUSING_THEME_CHUNK_PREFIX = "housing_theme_";
 static const char * const HOUSING_TEMPLATE_CHUNK = "housing_template";
 static const char * const HOUSING_PORTAL_TARGET_KEY = "housing_target";
+static const char * const HOUSING_LOCAL_PORTAL_KEY = "housing_portal_name";
+static const char * const HOUSING_VISITOR_STRIP_KEY = "housing_visitor_strip";
+static const char * const HOUSING_LOCAL_PORTAL_TILE =
+    "dngn_trap_golubria";
 static const char * const HOUSING_SPAWN_MARKER_KEY = "housing_spawn";
 static const char * const HOUSING_VISITOR_WALL_KEY = "housing_visitor_wall";
 static const char * const HOUSING_MONSTER_KEY = "housing_created_monster";
@@ -106,9 +113,15 @@ static const int HOUSING_SNAPSHOT_WALL_SCHEMA = 3;
 // Schema 4 renders owner-only barriers as translucent permarock. Readers keep
 // accepting schema-3 metal barriers so existing homes can migrate them, while
 // older cores reject newly published translucent barriers before loading.
-static const int HOUSING_SNAPSHOT_SCHEMA = 4;
+static const int HOUSING_SNAPSHOT_WALL_CURRENT_SCHEMA = 4;
+// Schema 5 adds persistent named same-level passages and visitor-only
+// inventory stripping tiles. Their inert rollback-safe terrain substrates do
+// not corrupt old canonical saves, while the public metadata gate prevents an
+// already-running older visitor process from silently ignoring their roles.
+static const int HOUSING_SNAPSHOT_SCHEMA = 5;
 static const int HOUSING_MAX_MONSTERS = 64;
 static const int HOUSING_MAX_SHOPS = 32;
+static const int HOUSING_MAX_LOCAL_PORTALS = 128;
 static const int HOUSING_INDEX_SCHEMA = 1;
 static const int HOUSING_THEME_SCHEMA = 1;
 static const int HOUSING_MAX_MAPS = 64;
@@ -277,6 +290,9 @@ static bool _ensure_owner_map_storage();
 static bool _housing_shop_can_be_published(const coord_def &pos);
 static bool _current_visitor_wall_marker_at(const coord_def &pos);
 static bool _portal_target_at(const coord_def &pos, string *target);
+static bool _local_portal_name_at(const coord_def &pos, string *portal_name);
+static bool _visitor_strip_marker_at(const coord_def &pos);
+static void _restore_housing_fixture_tile_overrides();
 static void _promote_staged_owner_map(bool exact_rollback = false,
                                       int rollback_turn_origin = -1);
 static void _open_visitor_only_walls();
@@ -471,6 +487,10 @@ static void _apply_housing_map_theme(int theme)
         store_tilename_get_index(definition.rock_tile);
     tile_clear_flavour();
     tile_init_flavour();
+    // Applying a branch theme deliberately resets every per-cell flavour.
+    // Reapply only exact authenticated Housing overrides so named passages
+    // keep their Golubria appearance across owner save/reload.
+    _restore_housing_fixture_tile_overrides();
 }
 
 static void _copy_package_chunk(package &save, const string &source,
@@ -714,6 +734,7 @@ static bool _supported_snapshot_schema(int schema)
     return schema == HOUSING_SNAPSHOT_LEGACY_SCHEMA
            || schema == HOUSING_SNAPSHOT_WORLD_SCHEMA
            || schema == HOUSING_SNAPSHOT_WALL_SCHEMA
+           || schema == HOUSING_SNAPSHOT_WALL_CURRENT_SCHEMA
            || schema == HOUSING_SNAPSHOT_SCHEMA;
 }
 
@@ -730,16 +751,21 @@ bool housing_snapshot_schema_supported(int schema)
 static void _write_snapshot_meta(package &snapshot, const string &account_id,
                                  const string &map_id)
 {
-    // Keep barrier-free maps readable by already-running schema-3 processes
-    // during a rolling deployment. Only a map which actually contains the new
-    // translucent owner-only fixture needs schema 4's fail-closed gate.
+    // Keep maps without new fixtures readable by already-running processes
+    // during a rolling deployment. Translucent walls require schema 4, while
+    // named passages and visitor inventory strips require schema 5.
     int schema = HOUSING_SNAPSHOT_WALL_SCHEMA;
     for (map_marker *marker : env.markers.get_all())
-        if (_current_visitor_wall_marker_at(marker->pos))
+    {
+        if (_local_portal_name_at(marker->pos, nullptr)
+            || _visitor_strip_marker_at(marker->pos))
         {
             schema = HOUSING_SNAPSHOT_SCHEMA;
             break;
         }
+        if (_current_visitor_wall_marker_at(marker->pos))
+            schema = HOUSING_SNAPSHOT_WALL_CURRENT_SCHEMA;
+    }
     writer output(&snapshot, HOUSING_META_CHUNK);
     marshallInt(output, schema);
     marshallString(output, Version::Long);
@@ -1155,17 +1181,163 @@ static bool _valid_spawn(const coord_def &pos)
     return feat == DNGN_FLOOR || feat == DNGN_RUNELIGHT;
 }
 
+static const char * const HOUSING_FIXTURE_KEYS[] =
+{
+    HOUSING_PORTAL_TARGET_KEY,
+    HOUSING_LOCAL_PORTAL_KEY,
+    HOUSING_VISITOR_STRIP_KEY,
+    HOUSING_SPAWN_MARKER_KEY,
+    HOUSING_VISITOR_WALL_KEY,
+};
+
+static const map_wiz_props_marker *_housing_wiz_marker(map_marker *marker)
+{
+    return marker && marker->get_type() == MAT_WIZ_PROPS
+           ? static_cast<const map_wiz_props_marker *>(marker) : nullptr;
+}
+
+static bool _marker_has_key(map_marker *marker, const char *key)
+{
+    const map_wiz_props_marker *wiz = _housing_wiz_marker(marker);
+    return wiz && wiz->properties.count(key);
+}
+
+static bool _marker_has_only_fixture_role(map_marker *marker,
+                                          const char *role)
+{
+    const map_wiz_props_marker *wiz = _housing_wiz_marker(marker);
+    if (!wiz || !wiz->properties.count(role))
+        return false;
+    for (const char *key : HOUSING_FIXTURE_KEYS)
+        if (string(key) != role && wiz->properties.count(key))
+            return false;
+    return true;
+}
+
+static bool _marker_properties_are(map_marker *marker,
+                                   const map<string, string> &expected)
+{
+    const map_wiz_props_marker *wiz = _housing_wiz_marker(marker);
+    return wiz && wiz->properties == expected;
+}
+
+static bool _feature_tile_override_at(const coord_def &pos,
+                                      const char *tile_name)
+{
+    if (!tile_name || !*tile_name)
+        return false;
+    const tile_flavour &flavour = tile_env.flv(pos);
+    if (!flavour.feat_idx || flavour.feat_idx > tile_env.names.size()
+        || tile_env.names[flavour.feat_idx - 1] != tile_name)
+    {
+        return false;
+    }
+    tileidx_t expected;
+    return tile_dngn_index(tile_name, &expected) && flavour.feat == expected;
+}
+
+static bool _set_feature_tile_override(const coord_def &pos,
+                                       const char *tile_name)
+{
+    tileidx_t tile;
+    if (!tile_dngn_index(tile_name, &tile))
+        return false;
+    tile_env.flv(pos).feat = tile;
+    tile_env.flv(pos).feat_idx = store_tilename_get_index(tile_name);
+    set_terrain_changed(pos);
+    return true;
+}
+
+static bool _local_portal_marker_at(const coord_def &pos,
+                                    string *portal_name)
+{
+    if (!map_bounds(pos) || env.grid(pos) != DNGN_STONE_ARCH)
+        return false;
+    const vector<map_marker*> markers = env.markers.get_markers_at(pos);
+    if (markers.size() != 1
+        || !_marker_has_only_fixture_role(markers.front(),
+                                          HOUSING_LOCAL_PORTAL_KEY))
+    {
+        return false;
+    }
+    const string name = markers.front()->property(HOUSING_LOCAL_PORTAL_KEY);
+    const map<string, string> expected =
+    {
+        { HOUSING_LOCAL_PORTAL_KEY, name },
+        { "feature_description", "housing passage " + name },
+        { "veto_destroy", "veto" },
+    };
+    if (!_is_map_id(name)
+        || !_marker_properties_are(markers.front(), expected))
+    {
+        return false;
+    }
+    if (portal_name)
+        *portal_name = name;
+    return true;
+}
+
+static bool _local_portal_name_at(const coord_def &pos, string *portal_name)
+{
+    return _local_portal_marker_at(pos, portal_name)
+        && _feature_tile_override_at(pos, HOUSING_LOCAL_PORTAL_TILE);
+}
+
+static void _restore_housing_fixture_tile_overrides()
+{
+    for (map_marker *marker : env.markers.get_all())
+    {
+        if (_local_portal_marker_at(marker->pos, nullptr)
+            && !_set_feature_tile_override(marker->pos,
+                                           HOUSING_LOCAL_PORTAL_TILE))
+        {
+            fail("Housing passage tile is unavailable");
+        }
+    }
+}
+
+static bool _visitor_strip_marker_at(const coord_def &pos)
+{
+    if (!map_bounds(pos) || env.grid(pos) != DNGN_TRANSPORTER_LANDING)
+        return false;
+    const vector<map_marker*> markers = env.markers.get_markers_at(pos);
+    const map<string, string> expected =
+    {
+        { HOUSING_VISITOR_STRIP_KEY, "yes" },
+        { "feature_description", "visitor inventory stripping tile" },
+        { "veto_destroy", "veto" },
+    };
+    return markers.size() == 1
+        && _marker_has_only_fixture_role(markers.front(),
+                                         HOUSING_VISITOR_STRIP_KEY)
+        && _marker_properties_are(markers.front(), expected);
+}
+
+static bool _fixture_key_state_at(const coord_def &pos, const char *key)
+{
+    if (!map_bounds(pos))
+        return false;
+    for (map_marker *marker : env.markers.get_markers_at(pos))
+        if (_marker_has_key(marker, key))
+            return true;
+    return false;
+}
+
 static bool _spawn_marker_at(const coord_def &pos)
 {
     if (!map_bounds(pos) || env.grid(pos) != DNGN_RUNELIGHT)
         return false;
     const vector<map_marker*> markers = env.markers.get_markers_at(pos);
+    const map<string, string> expected =
+    {
+        { HOUSING_SPAWN_MARKER_KEY, "yes" },
+        { "feature_description", "housing spawn point" },
+        { "veto_destroy", "veto" },
+    };
     return markers.size() == 1
-        && markers.front()->get_type() == MAT_WIZ_PROPS
-        && markers.front()->property(HOUSING_SPAWN_MARKER_KEY) == "yes"
-        && markers.front()->property(HOUSING_PORTAL_TARGET_KEY).empty()
-        && markers.front()->property(HOUSING_VISITOR_WALL_KEY).empty()
-        && markers.front()->property("veto_destroy") == "veto";
+        && _marker_has_only_fixture_role(markers.front(),
+                                         HOUSING_SPAWN_MARKER_KEY)
+        && _marker_properties_are(markers.front(), expected);
 }
 
 static bool _visitor_wall_feature(dungeon_feature_type feat)
@@ -1181,12 +1353,16 @@ static bool _visitor_wall_marker_at(const coord_def &pos)
     if (!map_bounds(pos) || !_visitor_wall_feature(env.grid(pos)))
         return false;
     const vector<map_marker*> markers = env.markers.get_markers_at(pos);
+    const map<string, string> expected =
+    {
+        { HOUSING_VISITOR_WALL_KEY, "yes" },
+        { "feature_description", "owner-only barrier" },
+        { "veto_destroy", "veto" },
+    };
     return markers.size() == 1
-        && markers.front()->get_type() == MAT_WIZ_PROPS
-        && markers.front()->property(HOUSING_VISITOR_WALL_KEY) == "yes"
-        && markers.front()->property(HOUSING_SPAWN_MARKER_KEY).empty()
-        && markers.front()->property(HOUSING_PORTAL_TARGET_KEY).empty()
-        && markers.front()->property("veto_destroy") == "veto";
+        && _marker_has_only_fixture_role(markers.front(),
+                                         HOUSING_VISITOR_WALL_KEY)
+        && _marker_properties_are(markers.front(), expected);
 }
 
 static bool _current_visitor_wall_marker_at(const coord_def &pos)
@@ -1765,6 +1941,58 @@ static bool _housing_portal_state_at(const coord_def &pos)
     return false;
 }
 
+static bool _housing_local_portal_state_at(const coord_def &pos)
+{
+    return _fixture_key_state_at(pos, HOUSING_LOCAL_PORTAL_KEY);
+}
+
+static bool _remove_housing_local_portal(const coord_def &pos)
+{
+    if (!_local_portal_name_at(pos, nullptr)
+        || (actor_at(pos) && pos != you.pos())
+        || env.igrid(pos) != NON_ITEM || housing_is_spawn(pos))
+    {
+        mpr("That named Housing passage cannot be removed safely.");
+        return false;
+    }
+
+    map_marker *marker = env.markers.get_markers_at(pos).front();
+    env.markers.remove(marker);
+    _clear_housing_cell_to_floor(pos);
+    mpr("The named Housing passage is removed.");
+    return true;
+}
+
+static bool _housing_visitor_strip_state_at(const coord_def &pos)
+{
+    return env.grid(pos) == DNGN_TRANSPORTER_LANDING
+        || _fixture_key_state_at(pos, HOUSING_VISITOR_STRIP_KEY);
+}
+
+bool housing_movement_fixture_is_reserved(const coord_def &pos)
+{
+    return crawl_state.game_is_housing()
+        && (_housing_local_portal_state_at(pos)
+            || _housing_visitor_strip_state_at(pos));
+}
+
+static bool _remove_housing_visitor_strip(const coord_def &pos)
+{
+    if (!_visitor_strip_marker_at(pos)
+        || (actor_at(pos) && pos != you.pos())
+        || env.igrid(pos) != NON_ITEM || housing_is_spawn(pos))
+    {
+        mpr("That visitor inventory tile cannot be removed safely.");
+        return false;
+    }
+
+    map_marker *marker = env.markers.get_markers_at(pos).front();
+    env.markers.remove(marker);
+    _clear_housing_cell_to_floor(pos);
+    mpr("The visitor inventory tile is removed.");
+    return true;
+}
+
 static bool _remove_housing_portal(const coord_def &pos)
 {
     if (!_portal_target_at(pos, nullptr)
@@ -1829,6 +2057,10 @@ bool housing_clear_terrain(const coord_def &pos)
         return _remove_housing_spawn(pos, spawns) || items_cleared;
     if (_visitor_wall_marker_at(pos))
         return _remove_housing_visitor_wall(pos) || items_cleared;
+    if (_housing_local_portal_state_at(pos))
+        return _remove_housing_local_portal(pos) || items_cleared;
+    if (_housing_visitor_strip_state_at(pos))
+        return _remove_housing_visitor_strip(pos) || items_cleared;
     if (_housing_portal_state_at(pos))
         return _remove_housing_portal(pos) || items_cleared;
     if (env.grid(pos) == DNGN_ENTER_SHOP
@@ -1991,13 +2223,19 @@ static bool _portal_target_at(const coord_def &pos, string *target)
         return false;
 
     const vector<map_marker*> markers = env.markers.get_markers_at(pos);
-    if (markers.size() != 1 || markers.front()->get_type() != MAT_WIZ_PROPS)
+    if (markers.size() != 1)
         return false;
     const string value = markers.front()->property(HOUSING_PORTAL_TARGET_KEY);
+    const map<string, string> expected =
+    {
+        { HOUSING_PORTAL_TARGET_KEY, value },
+        { "feature_description", "housing portal to " + value },
+        { "veto_destroy", "veto" },
+    };
     if (!housing_valid_map_target(value)
-        || !markers.front()->property(HOUSING_SPAWN_MARKER_KEY).empty()
-        || !markers.front()->property(HOUSING_VISITOR_WALL_KEY).empty()
-        || markers.front()->property("veto_destroy") != "veto")
+        || !_marker_has_only_fixture_role(markers.front(),
+                                          HOUSING_PORTAL_TARGET_KEY)
+        || !_marker_properties_are(markers.front(), expected))
     {
         return false;
     }
@@ -2011,12 +2249,96 @@ bool housing_portal_is_valid(const coord_def &pos)
     return crawl_state.game_is_housing() && _portal_target_at(pos, nullptr);
 }
 
+bool housing_local_portal_is_valid(const coord_def &pos)
+{
+    return crawl_state.game_is_housing()
+        && _local_portal_name_at(pos, nullptr);
+}
+
+bool housing_visitor_strip_is_valid(const coord_def &pos)
+{
+    return crawl_state.game_is_housing() && _visitor_strip_marker_at(pos);
+}
+
+static int _housing_local_portal_count()
+{
+    int count = 0;
+    for (map_marker *marker : env.markers.get_all())
+        if (_marker_has_key(marker, HOUSING_LOCAL_PORTAL_KEY))
+            ++count;
+    return count;
+}
+
+bool housing_create_local_portal(const coord_def &pos,
+                                 const string &portal_name)
+{
+    if (!_is_map_id(portal_name))
+    {
+        mprf(MSGCH_PROMPT,
+             "Use 1-20 ASCII letters, digits, or _ for a local portal name.");
+        return false;
+    }
+    if (!housing_can_edit(pos) || env.grid(pos) != DNGN_FLOOR)
+    {
+        mpr("Choose an empty ordinary floor square for the named passage.");
+        return false;
+    }
+    if (_housing_local_portal_count() >= HOUSING_MAX_LOCAL_PORTALS)
+    {
+        mpr("This Housing map has too many named passage endpoints.");
+        return false;
+    }
+    if (!housing_authorize_action("create a named passage", 0))
+        return false;
+
+    dungeon_terrain_changed(pos, DNGN_STONE_ARCH, false, false, true);
+    if (!_set_feature_tile_override(pos, HOUSING_LOCAL_PORTAL_TILE))
+    {
+        _clear_housing_cell_to_floor(pos);
+        fail("Housing passage tile is unavailable");
+    }
+    auto *marker = new map_wiz_props_marker(pos);
+    marker->set_property(HOUSING_LOCAL_PORTAL_KEY, portal_name);
+    marker->set_property("feature_description",
+                         "housing passage " + portal_name);
+    marker->set_property("veto_destroy", "veto");
+    env.markers.add(marker);
+    mprf("A named Housing passage '%s' is created.",
+         portal_name.c_str());
+    return true;
+}
+
+bool housing_create_visitor_strip(const coord_def &pos)
+{
+    if (!housing_can_edit(pos) || env.grid(pos) != DNGN_FLOOR)
+    {
+        mpr("Choose an empty ordinary floor square for the visitor inventory tile.");
+        return false;
+    }
+    if (!housing_authorize_action("create a visitor inventory tile", 0))
+        return false;
+
+    dungeon_terrain_changed(pos, DNGN_TRANSPORTER_LANDING,
+                            false, false, true);
+    auto *marker = new map_wiz_props_marker(pos);
+    marker->set_property(HOUSING_VISITOR_STRIP_KEY, "yes");
+    marker->set_property("feature_description",
+                         "visitor inventory stripping tile");
+    marker->set_property("veto_destroy", "veto");
+    env.markers.add(marker);
+    mpr("A visitor inventory stripping tile is created.");
+    return true;
+}
+
 bool housing_create_portal(const coord_def &pos, const string &target)
 {
+    if (_is_map_id(target))
+        return housing_create_local_portal(pos, target);
     if (!housing_valid_map_target(target))
     {
         mprf(MSGCH_PROMPT,
-             "Use an account:map identifier (ASCII letters, digits, and _).");
+             "Use account:map or a 1-20 character local portal name "
+             "(ASCII letters, digits, and _).");
         return false;
     }
     if (!housing_can_edit(pos))
@@ -2035,6 +2357,124 @@ bool housing_create_portal(const coord_def &pos, const string &target)
                          "housing portal to " + target);
     marker->set_property("veto_destroy", "veto");
     env.markers.add(marker);
+    return true;
+}
+
+bool housing_local_portal_destination(const coord_def &source,
+                                      coord_def &destination,
+                                      bool *occupied)
+{
+    string portal_name;
+    if (!_local_portal_name_at(source, &portal_name))
+        return false;
+
+    vector<coord_def> destinations;
+    bool found_occupied = false;
+    for (rectangle_iterator pos(0); pos; ++pos)
+    {
+        if (*pos == source)
+            continue;
+        string candidate_name;
+        if (!_local_portal_name_at(*pos, &candidate_name)
+            || candidate_name != portal_name)
+        {
+            continue;
+        }
+        if (actor_at(*pos))
+            found_occupied = true;
+        else
+            destinations.push_back(*pos);
+    }
+    if (occupied)
+        *occupied = found_occupied;
+    if (destinations.empty())
+        return false;
+    destination = destinations[random2(destinations.size())];
+    return true;
+}
+
+bool housing_trigger_local_portal(actor &triggerer)
+{
+    if (!crawl_state.game_is_housing()
+        || !_housing_local_portal_state_at(triggerer.pos()))
+    {
+        return false;
+    }
+
+    string portal_name;
+    if (!_local_portal_name_at(triggerer.pos(), &portal_name))
+    {
+        if (triggerer.is_player())
+            mprf(MSGCH_ERROR, "This named Housing passage is malformed.");
+        return true;
+    }
+    if (!you.see_cell_no_trans(triggerer.pos()))
+        return true;
+
+    monster *mons = triggerer.as_monster();
+    if (mons && mons_is_tentacle_or_tentacle_segment(mons->type))
+        return true;
+
+    bool occupied_destination = false;
+    coord_def destination;
+    if (!housing_local_portal_destination(triggerer.pos(), destination,
+                                          &occupied_destination))
+    {
+        if (triggerer.is_player())
+        {
+            mprf("This passage %s!", occupied_destination
+                 ? "seems to be blocked by something"
+                 : "doesn't lead anywhere");
+        }
+        return true;
+    }
+
+    if (triggerer.is_player())
+        mprf("You enter the Housing passage '%s'.", portal_name.c_str());
+    else
+        simple_monster_message(*mons, " enters a Housing passage.");
+    if (!triggerer.move_to(destination, MV_TRANSLOCATION | MV_GOLUBRIA))
+        fail("Housing passage destination became unavailable");
+    return true;
+}
+
+bool housing_trigger_visitor_strip(actor &triggerer)
+{
+    const coord_def pos = triggerer.pos();
+    if (!crawl_state.game_is_housing()
+        || !_housing_visitor_strip_state_at(pos))
+    {
+        return false;
+    }
+    if (!_visitor_strip_marker_at(pos))
+    {
+        if (triggerer.is_player())
+        {
+            mprf(MSGCH_ERROR,
+                 "This visitor inventory stripping tile is malformed.");
+        }
+        return true;
+    }
+    if (!triggerer.is_player() || !housing_is_visitor())
+        return true;
+
+    const bool had_items = std::any_of(you.inv.begin(), you.inv.end(),
+                                       [](const item_def &item) {
+                                           return item.defined();
+                                       });
+    if (!had_items)
+    {
+        mpr("The visitor inventory tile finds nothing to remove.");
+        return true;
+    }
+    if (!destroy_player_inventory_for_housing())
+    {
+        mprf(MSGCH_ERROR,
+             "The visitor inventory tile cannot safely remove this inventory.");
+        return true;
+    }
+    mpr("The visitor inventory tile destroys all equipment and carried items "
+        "for this visit.");
     return true;
 }
 
@@ -3827,6 +4267,28 @@ static bool _current_map_can_be_published()
                 return false;
             }
         }
+        else if (feat == DNGN_TRANSPORTER_LANDING)
+        {
+            if (!_visitor_strip_marker_at(*pos))
+            {
+                mprf(MSGCH_ERROR,
+                     "Housing publish rejected: invalid visitor inventory "
+                     "tile at (%d,%d).", pos->x, pos->y);
+                return false;
+            }
+        }
+        else if (feat == DNGN_STONE_ARCH
+                 && _feature_tile_override_at(*pos,
+                                              HOUSING_LOCAL_PORTAL_TILE))
+        {
+            if (!_local_portal_name_at(*pos, nullptr))
+            {
+                mprf(MSGCH_ERROR,
+                     "Housing publish rejected: unauthenticated named "
+                     "passage tile at (%d,%d).", pos->x, pos->y);
+                return false;
+            }
+        }
         else if (!housing_feature_allowed(feat))
         {
             mprf(MSGCH_ERROR,
@@ -3863,11 +4325,19 @@ static bool _current_map_can_be_published()
             return false;
         }
 
+    int local_portals = 0;
     for (map_marker *marker : env.markers.get_all())
+    {
+        const bool local_portal =
+            _local_portal_name_at(marker->pos, nullptr);
+        if (local_portal)
+            ++local_portals;
         if ((marker->get_type() != MAT_WIZ_PROPS
              || (!_portal_target_at(marker->pos, nullptr)
                  && !_spawn_marker_at(marker->pos)
-                 && !_current_visitor_wall_marker_at(marker->pos))))
+                 && !_current_visitor_wall_marker_at(marker->pos)
+                 && !local_portal
+                 && !_visitor_strip_marker_at(marker->pos))))
         {
             mprf(MSGCH_ERROR,
                  "Housing publish rejected: marker %d at (%d,%d).",
@@ -3875,9 +4345,16 @@ static bool _current_map_can_be_published()
                  marker->pos.x, marker->pos.y);
             return false;
         }
+    }
+    if (local_portals > HOUSING_MAX_LOCAL_PORTALS)
+    {
+        mprf(MSGCH_ERROR,
+             "Housing publish rejected: too many named passage endpoints.");
+        return false;
+    }
 
     // Public snapshots are data, not executable map definitions. Only the
-    // strictly validated Housing portal and spawn markers above are accepted.
+    // strictly validated authenticated Housing fixtures above are accepted.
     if (!env.cloud.empty())
     {
         mprf(MSGCH_ERROR, "Housing publish rejected: cloud state.");

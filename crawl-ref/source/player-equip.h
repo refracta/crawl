@@ -142,6 +142,12 @@ void equip_item(equipment_slot slot, int item_slot, bool msg=true,
                 bool skip_effects=false);
 bool unequip_item(item_def& item, bool msg=true, bool skip_effects=false);
 
+// Destroy every item carried by the player, including equipped items and the
+// active talisman, without applying ordinary on-removal penalties. This is a
+// specialised operation for disposable Housing visitor state; callers are
+// responsible for enforcing that context.
+bool destroy_player_inventory_for_housing();
+
 bool slot_is_melded(equipment_slot slot);
 
 void autoequip_item(item_def& item);

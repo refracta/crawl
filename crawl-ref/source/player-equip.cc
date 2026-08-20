@@ -34,6 +34,7 @@
 #include "output.h"
 #include "player.h"
 #include "player-stats.h"
+#include "quiver.h"
 #include "religion.h"
 #include "shopping.h"
 #include "skills.h"
@@ -41,6 +42,7 @@
 #include "spl-clouds.h"
 #include "spl-summoning.h"
 #include "spl-transloc.h"
+#include "state.h"
 #include "stringutil.h"
 #include "tag-version.h"
 #include "transform.h"
@@ -1617,21 +1619,40 @@ void equip_item(equipment_slot slot, int item_slot, bool msg, bool skip_effects)
 }
 
 // Unequip an equipped item (possibly melded).
-bool unequip_item(item_def& item, bool msg, bool skip_effects)
+enum class unequip_reason
 {
+    normal,
+    housing_inventory_destruction,
+};
+
+static void _unequip_effect(int item_slot, bool meld, bool msg,
+                            bool was_melded, unequip_reason reason);
+
+static bool _unequip_item(item_def& item, bool msg, bool skip_effects,
+                          unequip_reason reason)
+{
+    const bool destroying_housing_inventory =
+        reason == unequip_reason::housing_inventory_destruction;
+
 #ifdef USE_TILE_LOCAL
     const unsigned int old_talents = your_talents().size();
 #endif
 
 #ifdef USE_SOUND
-    parse_sound(item.base_type == OBJ_JEWELLERY
-                                        ? REMOVE_JEWELLERY_SOUND :
-                    is_weapon(item) ? WIELD_NOTHING_SOUND
-                                    : DEQUIP_ARMOUR_SOUND);
+    if (!destroying_housing_inventory)
+    {
+        parse_sound(item.base_type == OBJ_JEWELLERY
+                                            ? REMOVE_JEWELLERY_SOUND :
+                        is_weapon(item) ? WIELD_NOTHING_SOUND
+                                        : DEQUIP_ARMOUR_SOUND);
+    }
 #endif
 
-    if (is_weapon(item) && you.has_mutation(MUT_SLOW_WIELD) && !skip_effects)
+    if (is_weapon(item) && you.has_mutation(MUT_SLOW_WIELD) && !skip_effects
+        && !destroying_housing_inventory)
+    {
         say_farewell_to_weapon(item);
+    }
 
     const int item_slot = item.link;
     bool was_melded = item_is_melded(item);
@@ -1639,9 +1660,13 @@ bool unequip_item(item_def& item, bool msg, bool skip_effects)
     you.equipment.update();
 
     if (!skip_effects)
-        unequip_effect(item_slot, false, msg, was_melded);
+        _unequip_effect(item_slot, false, msg, was_melded, reason);
 
-    ash_check_bondage();
+    // Batch Ashenzari's derived piety/skill/HP/MP recalculation until every
+    // item has been detached; repeating its proportional resource scaling for
+    // each destroyed slot would make the result order-dependent.
+    if (!destroying_housing_inventory)
+        ash_check_bondage();
     you.last_unequip = item_slot;
 
 #ifdef USE_TILE_LOCAL
@@ -1664,13 +1689,23 @@ bool unequip_item(item_def& item, bool msg, bool skip_effects)
     return true;
 }
 
+bool unequip_item(item_def& item, bool msg, bool skip_effects)
+{
+    return _unequip_item(item, msg, skip_effects, unequip_reason::normal);
+}
+
 static void _equip_weapon_effect(item_def& item, bool showMsgs, bool unmeld);
+static void _unequip_artefact_effect(item_def& item, bool *show_msgs,
+                                     bool meld, bool was_melded,
+                                     unequip_reason reason);
 static void _unequip_weapon_effect(item_def& item, bool showMsgs, bool meld,
-                                   bool was_melded);
+                                   bool was_melded, unequip_reason reason);
 static void _equip_armour_effect(item_def& arm, bool unmeld);
-static void _unequip_armour_effect(item_def& item, bool meld, bool was_melded);
+static void _unequip_armour_effect(item_def& item, bool meld, bool was_melded,
+                                   unequip_reason reason);
 static void _equip_jewellery_effect(item_def &item, bool unmeld);
-static void _unequip_jewellery_effect(item_def &item, bool meld, bool was_melded);
+static void _unequip_jewellery_effect(item_def &item, bool meld, bool was_melded,
+                                      unequip_reason reason);
 static void _handle_regen_item_equip(const item_def& item);
 
 void equip_effect(int item_slot, bool unmeld, bool msg)
@@ -1711,27 +1746,37 @@ static void _unequip_maybe_destroy_item(item_def& item)
     }
 }
 
-void unequip_effect(int item_slot, bool meld, bool msg, bool was_melded)
+static void _unequip_effect(int item_slot, bool meld, bool msg,
+                            bool was_melded, unequip_reason reason)
 {
     item_def& item = you.inv[item_slot];
+
+    const bool destroying_housing_inventory =
+        reason == unequip_reason::housing_inventory_destruction;
 
     const interrupt_block block_meld_interrupts(meld);
 
     if (is_artefact(item))
-        unequip_artefact_effect(item, &msg, meld, was_melded);
+        _unequip_artefact_effect(item, &msg, meld, was_melded, reason);
 
     if (is_weapon(item))
-        _unequip_weapon_effect(item, msg, meld, was_melded);
+        _unequip_weapon_effect(item, msg, meld, was_melded, reason);
     else if (item.base_type == OBJ_ARMOUR)
-        _unequip_armour_effect(item, meld, was_melded);
+        _unequip_armour_effect(item, meld, was_melded, reason);
     else if (item.base_type == OBJ_JEWELLERY)
-        _unequip_jewellery_effect(item, meld, was_melded);
+        _unequip_jewellery_effect(item, meld, was_melded, reason);
 
     if (item_affects_agrid(item))
         invalidate_agrid();
 
-    if (!meld)
+    if (!meld && !destroying_housing_inventory)
         _unequip_maybe_destroy_item(item);
+}
+
+void unequip_effect(int item_slot, bool meld, bool msg, bool was_melded)
+{
+    _unequip_effect(item_slot, meld, msg, was_melded,
+                    unequip_reason::normal);
 }
 
 ///////////////////////////////////////////////////////////
@@ -1806,10 +1851,14 @@ void equip_artefact_effect(item_def &item, bool *show_msgs, bool unmeld)
         calc_mp();
 }
 
-void unequip_artefact_effect(item_def &item,  bool *show_msgs, bool meld,
-                             bool was_melded)
+static void _unequip_artefact_effect(item_def &item, bool *show_msgs,
+                                     bool meld, bool was_melded,
+                                     unequip_reason reason)
 {
     ASSERT(is_artefact(item));
+
+    const bool destroying_housing_inventory =
+        reason == unequip_reason::housing_inventory_destruction;
 
     artefact_properties_t proprt;
     artefact_properties(item, proprt);
@@ -1823,8 +1872,11 @@ void unequip_artefact_effect(item_def &item,  bool *show_msgs, bool meld,
         // This doesn't trigger for melding because we must finish the
         // transformation before landing the player (in case we are going into
         // a flying form).
-        if (proprt[ARTP_FLY] != 0 && !meld)
+        if (proprt[ARTP_FLY] != 0 && !meld
+            && !destroying_housing_inventory)
+        {
             land_player();
+        }
 
         if (proprt[ARTP_AC] || proprt[ARTP_SHIELDING])
             you.redraw_armour_class = true;
@@ -1832,10 +1884,11 @@ void unequip_artefact_effect(item_def &item,  bool *show_msgs, bool meld,
         if (proprt[ARTP_EVASION])
             you.redraw_evasion = true;
 
-        if (proprt[ARTP_HP])
+        if (proprt[ARTP_HP] && !destroying_housing_inventory)
             _calc_hp_artefact();
 
-        if (proprt[ARTP_MAGICAL_POWER] && !you.has_mutation(MUT_HP_CASTING))
+        if (proprt[ARTP_MAGICAL_POWER] && !you.has_mutation(MUT_HP_CASTING)
+            && !destroying_housing_inventory)
         {
             const bool gives_mp = proprt[ARTP_MAGICAL_POWER] > 0;
             if (msg)
@@ -1845,12 +1898,15 @@ void unequip_artefact_effect(item_def &item,  bool *show_msgs, bool meld,
             calc_mp();
         }
 
-        notify_stat_change(STAT_STR, -proprt[ARTP_STRENGTH],
-                           !(msg && proprt[ARTP_STRENGTH]));
-        notify_stat_change(STAT_INT, -proprt[ARTP_INTELLIGENCE],
-                           !(msg && proprt[ARTP_INTELLIGENCE]));
-        notify_stat_change(STAT_DEX, -proprt[ARTP_DEXTERITY],
-                           !(msg && proprt[ARTP_DEXTERITY]));
+        if (!destroying_housing_inventory)
+        {
+            notify_stat_change(STAT_STR, -proprt[ARTP_STRENGTH],
+                               !(msg && proprt[ARTP_STRENGTH]));
+            notify_stat_change(STAT_INT, -proprt[ARTP_INTELLIGENCE],
+                               !(msg && proprt[ARTP_INTELLIGENCE]));
+            notify_stat_change(STAT_DEX, -proprt[ARTP_DEXTERITY],
+                               !(msg && proprt[ARTP_DEXTERITY]));
+        }
 
         if (proprt[ARTP_RAMPAGING] && msg && !you.rampaging())
             mpr("You no longer feel able to rampage towards enemies.");
@@ -1871,7 +1927,7 @@ void unequip_artefact_effect(item_def &item,  bool *show_msgs, bool meld,
     }
 
     // On-removal effects get skipped when melding.
-    if (!meld)
+    if (!meld && !destroying_housing_inventory)
     {
         if (proprt[ARTP_CONTAM])
         {
@@ -1891,6 +1947,13 @@ void unequip_artefact_effect(item_def &item,  bool *show_msgs, bool meld,
                 *show_msgs = false;
         }
     }
+}
+
+void unequip_artefact_effect(item_def &item, bool *show_msgs, bool meld,
+                             bool was_melded)
+{
+    _unequip_artefact_effect(item, show_msgs, meld, was_melded,
+                             unequip_reason::normal);
 }
 
 // Provide a function for handling initial wielding of 'special' weapons
@@ -2098,14 +2161,18 @@ static void _equip_weapon_effect(item_def& item, bool showMsgs, bool unmeld)
 }
 
 static void _unequip_weapon_effect(item_def& item, bool showMsgs, bool meld,
-                                   bool was_melded)
+                                   bool was_melded, unequip_reason reason)
 {
+    const bool destroying_housing_inventory =
+        reason == unequip_reason::housing_inventory_destruction;
+
     if (was_melded)
     {
         if (item.base_type == OBJ_WEAPONS
             && get_weapon_brand(item) == SPWPN_DISTORTION)
         {
-            unwield_distortion();
+            if (!destroying_housing_inventory)
+                unwield_distortion();
         }
         return;
     }
@@ -2169,7 +2236,7 @@ static void _unequip_weapon_effect(item_def& item, bool showMsgs, bool meld,
                 break;
 
             case SPWPN_DISTORTION:
-                if (!meld)
+                if (!meld && !destroying_housing_inventory)
                     unwield_distortion();
 
                 break;
@@ -2201,8 +2268,11 @@ static void _unequip_weapon_effect(item_def& item, bool showMsgs, bool meld,
                 break;
 
             case SPWPN_VALOUR:
-                mpr("You feel very meek.");
-                you.weaken(&you, 10);
+                if (!destroying_housing_inventory)
+                {
+                    mpr("You feel very meek.");
+                    you.weaken(&you, 10);
+                }
                 break;
 
             case SPWPN_ENTANGLING:
@@ -2413,8 +2483,12 @@ static void _equip_armour_effect(item_def& arm, bool unmeld)
     }
 }
 
-static void _unequip_armour_effect(item_def& item, bool meld, bool was_melded)
+static void _unequip_armour_effect(item_def& item, bool meld, bool was_melded,
+                                   unequip_reason reason)
 {
+    const bool destroying_housing_inventory =
+        reason == unequip_reason::housing_inventory_destruction;
+
     // No armour brands have an effect when destroyed from melded.
     if (was_melded)
         return;
@@ -2445,15 +2519,18 @@ static void _unequip_armour_effect(item_def& item, bool meld, bool was_melded)
         break;
 
     case SPARM_STRENGTH:
-        notify_stat_change(STAT_STR, -3, false);
+        if (!destroying_housing_inventory)
+            notify_stat_change(STAT_STR, -3, false);
         break;
 
     case SPARM_DEXTERITY:
-        notify_stat_change(STAT_DEX, -3, false);
+        if (!destroying_housing_inventory)
+            notify_stat_change(STAT_DEX, -3, false);
         break;
 
     case SPARM_INTELLIGENCE:
-        notify_stat_change(STAT_INT, -3, false);
+        if (!destroying_housing_inventory)
+            notify_stat_change(STAT_INT, -3, false);
         break;
 
     case SPARM_PONDEROUSNESS:
@@ -2466,7 +2543,7 @@ static void _unequip_armour_effect(item_def& item, bool meld, bool was_melded)
 
     case SPARM_FLYING:
         // XXX: Landing must be deferred until after form is actually changed.
-        if (!meld)
+        if (!meld && !destroying_housing_inventory)
             land_player();
         break;
 
@@ -2745,12 +2822,16 @@ static void _equip_jewellery_effect(item_def &item, bool unmeld)
         mprf_nocap("%s", item.name(DESC_INVENTORY_EQUIP).c_str());
 }
 
-static void _unequip_jewellery_effect(item_def &item, bool meld, bool was_melded)
+static void _unequip_jewellery_effect(item_def &item, bool meld,
+                                      bool was_melded, unequip_reason reason)
 {
+    const bool destroying_housing_inventory =
+        reason == unequip_reason::housing_inventory_destruction;
+
     // Only faith does anything when destroyed from melded.
     if (was_melded)
     {
-        if (item.sub_type == AMU_FAITH)
+        if (item.sub_type == AMU_FAITH && !destroying_housing_inventory)
             _remove_amulet_of_faith(item);
         return;
     }
@@ -2784,25 +2865,29 @@ static void _unequip_jewellery_effect(item_def &item, bool meld, bool was_melded
         break;
 
     case RING_STRENGTH:
-        notify_stat_change(STAT_STR, -item.plus, false);
+        if (!destroying_housing_inventory)
+            notify_stat_change(STAT_STR, -item.plus, false);
         break;
 
     case RING_DEXTERITY:
-        notify_stat_change(STAT_DEX, -item.plus, false);
+        if (!destroying_housing_inventory)
+            notify_stat_change(STAT_DEX, -item.plus, false);
         break;
 
     case RING_INTELLIGENCE:
-        notify_stat_change(STAT_INT, -item.plus, false);
+        if (!destroying_housing_inventory)
+            notify_stat_change(STAT_INT, -item.plus, false);
         break;
 
     case RING_FLIGHT:
         // XXX: Landing must be deferred until after form is actually changed.
-        if (!meld)
+        if (!meld && !destroying_housing_inventory)
             land_player();
         break;
 
     case RING_MAGICAL_POWER:
-        if (!you.has_mutation(MUT_HP_CASTING))
+        if (!you.has_mutation(MUT_HP_CASTING)
+            && !destroying_housing_inventory)
         {
             canned_msg(MSG_MANA_DECREASE);
             pay_mp(9);
@@ -2810,12 +2895,13 @@ static void _unequip_jewellery_effect(item_def &item, bool meld, bool was_melded
         break;
 
     case AMU_FAITH:
-        if (!meld)
+        if (!meld && !destroying_housing_inventory)
             _remove_amulet_of_faith(item);
         break;
 
     case AMU_WILDSHAPE:
-        _change_wildshape_status();
+        if (!destroying_housing_inventory)
+            _change_wildshape_status();
         break;
 
 #if TAG_MAJOR_VERSION == 34
@@ -2828,7 +2914,8 @@ static void _unequip_jewellery_effect(item_def &item, bool meld, bool was_melded
     }
 
     // Must occur after ring is removed. -- bwr
-    calc_mp();
+    if (!destroying_housing_inventory)
+        calc_mp();
 }
 
 static void _mark_unseen_monsters()
@@ -2870,4 +2957,122 @@ void unwield_distortion(bool brand)
         mpr("Space warps into you!");
         contaminate_player(random2avg(3000, 3), true);
     }
+}
+
+static bool _housing_inventory_links_are_valid()
+{
+    if (you.cur_talisman >= 0)
+    {
+        if (you.cur_talisman >= ENDOFPACK)
+            return false;
+
+        const item_def& talisman = you.inv[you.cur_talisman];
+        if (!talisman.defined() || talisman.link != you.cur_talisman
+            || talisman.base_type != OBJ_TALISMANS)
+        {
+            return false;
+        }
+    }
+
+    for (const player_equip_entry& entry : you.equipment.items)
+    {
+        if (entry.item < 0 || entry.item >= MAX_GEAR)
+            return false;
+
+        const item_def& item = you.inv[entry.item];
+        if (!item.defined() || item.link != entry.item)
+            return false;
+    }
+
+    return true;
+}
+
+bool destroy_player_inventory_for_housing()
+{
+    // Validate every hard inventory reference before doing any destructive
+    // work. A malformed visitor capsule must not be left half-stripped.
+    const bool valid_links = _housing_inventory_links_are_valid();
+    if (!valid_links)
+        return false;
+
+    msg::suppress quiet;
+
+    stop_delay(true, true);
+    crawl_state.cancel_cmd_repeat();
+    crawl_state.cancel_cmd_again();
+
+    // A talisman is not represented in player_equip_set. Detach it first so
+    // its form and artefact cache cannot retain a reference to the item slot.
+    item_def* const active_talisman = you.active_talisman();
+    clear_active_talisman_for_housing_inventory_destruction();
+    if (active_talisman && is_artefact(*active_talisman))
+    {
+        bool show_msgs = false;
+        _unequip_artefact_effect(*active_talisman, &show_msgs, false, false,
+                                 unequip_reason::housing_inventory_destruction);
+    }
+
+    // Multi-slot equipment has more than one entry. Collect inventory slots
+    // first and remove each physical item exactly once.
+    vector<int> equipped_slots;
+    for (const player_equip_entry& entry : you.equipment.items)
+    {
+        if (find(equipped_slots.begin(), equipped_slots.end(), entry.item)
+            == equipped_slots.end())
+        {
+            equipped_slots.push_back(entry.item);
+        }
+    }
+
+    for (int slot : equipped_slots)
+    {
+        _unequip_item(you.inv[slot], false, false,
+                      unequip_reason::housing_inventory_destruction);
+    }
+    ASSERT(you.equipment.items.empty());
+
+    // Item-backed actions keep hard inventory-slot references in both the
+    // current quiver and its history, so replace the complete state rather
+    // than merely selecting an empty action.
+    quiver::clear_inventory_references();
+    you.last_pickup.clear();
+    you.last_unequip = -1;
+    you.last_fired = -1;
+
+    // Clearing item_def directly intentionally leaves the unique-item ledger
+    // unchanged: the item was destroyed in this disposable visitor capsule,
+    // not made available for generation again.
+    for (int slot = 0; slot < ENDOFPACK; ++slot)
+        you.inv[slot].clear();
+
+    ASSERT(you.cur_talisman < 0);
+    ASSERT(all_of(you.inv.begin(), you.inv.end(),
+                  [](const item_def& item) { return !item.defined(); }));
+
+    you.equipment.update();
+
+    // Finish cleanup which is normally spread over individual on-removal
+    // callbacks, while deliberately omitting removal penalties (distortion,
+    // contamination/draining, faith loss, valour weakness, and the like).
+    you.duration[DUR_SPWPN_PROTECTION] = 0;
+    you.duration[DUR_DEVIOUS] = 0;
+    you.stop_directly_constricting_all(true);
+    you.attribute[ATTR_PERM_FLIGHT] = 0;
+
+    ash_check_bondage();
+    notify_stat_change();
+    calc_hp();
+    calc_mp();
+    update_vision_range();
+    _mark_unseen_monsters();
+    invalidate_agrid();
+
+    you.received_weapon_warning = false;
+    you.gear_change = true;
+    you.wield_change = true;
+    you.redraw_quiver = true;
+    you.redraw_armour_class = true;
+    you.redraw_evasion = true;
+    you.redraw_status_lights = true;
+    return true;
 }
