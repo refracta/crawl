@@ -41,6 +41,7 @@
 #include "tile-env.h"
 #include "viewgeom.h"
 #include "wizard.h"
+#include "wiz-dgn.h"
 #include "zot.h"
 
 extern map<level_id, string> level_uniques;
@@ -575,6 +576,49 @@ TEST_CASE("Housing editor self-targeting rejects without cancelling",
             == confirm_prompt_type::none);
 }
 
+TEST_CASE("Housing terrain brush geometry and size controls are stable",
+          "[single-file]")
+{
+    int size = HOUSING_TERRAIN_BRUSH_MIN_SIZE;
+    REQUIRE(HOUSING_TERRAIN_BRUSH_MAX_SIZE == 8);
+    REQUIRE(wizard_housing_brush_size_after_command(
+                size, CMD_TARGET_CYCLE_BACK)
+            == HOUSING_TERRAIN_BRUSH_MIN_SIZE);
+    for (int expected = 2; expected <= HOUSING_TERRAIN_BRUSH_MAX_SIZE;
+         ++expected)
+    {
+        size = wizard_housing_brush_size_after_command(
+            size, CMD_TARGET_CYCLE_FORWARD);
+        REQUIRE(size == expected);
+    }
+    REQUIRE(wizard_housing_brush_size_after_command(
+                size, CMD_TARGET_CYCLE_FORWARD)
+            == HOUSING_TERRAIN_BRUSH_MAX_SIZE);
+    REQUIRE(wizard_housing_brush_size_after_command(0, CMD_NO_CMD)
+            == HOUSING_TERRAIN_BRUSH_MIN_SIZE);
+    REQUIRE(wizard_housing_brush_size_after_command(99, CMD_NO_CMD)
+            == HOUSING_TERRAIN_BRUSH_MAX_SIZE);
+
+    const coord_def centre(20, 20);
+    const vector<coord_def> one =
+        wizard_housing_brush_cells(centre, 1);
+    REQUIRE(one == vector<coord_def>{centre});
+
+    const vector<coord_def> three =
+        wizard_housing_brush_cells(centre, 3);
+    REQUIRE(three.size() == 9);
+    REQUIRE(three.front() == coord_def(19, 19));
+    REQUIRE(three.back() == coord_def(21, 21));
+    REQUIRE(std::find(three.begin(), three.end(), centre) != three.end());
+
+    const vector<coord_def> four =
+        wizard_housing_brush_cells(centre, 4);
+    REQUIRE(four.size() == 16);
+    REQUIRE(four.front() == coord_def(19, 19));
+    REQUIRE(four.back() == coord_def(22, 22));
+    REQUIRE(set<coord_def>(four.begin(), four.end()).size() == four.size());
+}
+
 TEST_CASE("Housing snapshot schema is explicit and backwards compatible",
           "[single-file]")
 {
@@ -928,6 +972,140 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE(selected.isValid);
         REQUIRE_FALSE(selected.isCancel);
         REQUIRE_FALSE(selected.interactive);
+    }
+
+    SECTION("a noninteractive Housing Build applies changes and skips no-ops")
+    {
+        housing_ensure_level(false);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        const unsigned int saved_map_id =
+            env.level_map_ids(ambiguous_spawn);
+        unwinder restore_map_id = [saved_map_id, ambiguous_spawn]() {
+            env.level_map_ids(ambiguous_spawn) = saved_map_id;
+        };
+        env.level_map_ids(ambiguous_spawn) = INVALID_MAP_INDEX;
+        dist target;
+        target.target = ambiguous_spawn;
+        REQUIRE(wizard_create_feature(target, DNGN_STONE_WALL, false,
+                                      true, false));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_STONE_WALL);
+        REQUIRE_FALSE(wizard_create_feature(target, DNGN_STONE_WALL, false,
+                                            true, false));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_STONE_WALL);
+    }
+
+    SECTION("a marked cell rejects the entire Housing terrain brush")
+    {
+        housing_ensure_level(false);
+        env.markers.add(new map_wiz_props_marker(third_passage));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.grid(third_passage) == DNGN_FLOOR);
+        REQUIRE(wizard_apply_housing_terrain_brush(
+                    ambiguous_spawn, DNGN_STONE_WALL, 2)
+                == housing_terrain_brush_result::rejected);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.grid(third_passage) == DNGN_FLOOR);
+    }
+
+    SECTION("an item rejects the entire Housing terrain brush")
+    {
+        housing_ensure_level(false);
+        env.igrid(third_passage) = 0;
+        REQUIRE(wizard_apply_housing_terrain_brush(
+                    ambiguous_spawn, DNGN_STONE_WALL, 2)
+                == housing_terrain_brush_result::rejected);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.grid(third_passage) == DNGN_FLOOR);
+        REQUIRE(env.igrid(third_passage) == 0);
+    }
+
+    SECTION("the player rejects the entire Housing terrain brush")
+    {
+        housing_ensure_level(false);
+        REQUIRE(you.pos() == old_start);
+        REQUIRE(wizard_apply_housing_terrain_brush(
+                    old_start, DNGN_STONE_WALL, 2)
+                == housing_terrain_brush_result::rejected);
+        REQUIRE(env.grid(old_start) == DNGN_FLOOR);
+        REQUIRE(env.grid(template_spawn) == DNGN_RUNELIGHT);
+    }
+
+    SECTION("a Housing spawn rejects the entire terrain brush")
+    {
+        housing_ensure_level(false);
+        REQUIRE(housing_is_spawn(template_spawn));
+        REQUIRE(wizard_apply_housing_terrain_brush(
+                    template_spawn, DNGN_STONE_WALL, 2)
+                == housing_terrain_brush_result::rejected);
+        REQUIRE(env.grid(template_spawn) == DNGN_RUNELIGHT);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+    }
+
+    SECTION("a stale shop entry rejects the entire Housing terrain brush")
+    {
+        housing_ensure_level(false);
+        shop_struct orphan;
+        orphan.pos = third_passage;
+        orphan.type = SHOP_GENERAL;
+        orphan.level = 1;
+        env.shop[third_passage] = orphan;
+
+        REQUIRE(wizard_apply_housing_terrain_brush(
+                    ambiguous_spawn, DNGN_STONE_WALL, 2)
+                == housing_terrain_brush_result::rejected);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.grid(third_passage) == DNGN_FLOOR);
+        REQUIRE(env.shop.find(third_passage) != env.shop.end());
+    }
+
+    SECTION("an invalid terrain enum is not editable")
+    {
+        housing_ensure_level(false);
+        const dungeon_feature_type invalid_feat =
+            static_cast<dungeon_feature_type>(NUM_FEATURES);
+        env.grid(ambiguous_spawn) = invalid_feat;
+        REQUIRE_FALSE(housing_feature_allowed(invalid_feat));
+        REQUIRE_FALSE(housing_can_edit_ensured(ambiguous_spawn));
+        REQUIRE(wizard_apply_housing_terrain_brush(
+                    third_passage, invalid_feat, 1)
+                == housing_terrain_brush_result::rejected);
+        REQUIRE(env.grid(ambiguous_spawn) == invalid_feat);
+        REQUIRE(env.grid(third_passage) == DNGN_FLOOR);
+    }
+
+    SECTION("opaque terrain rejects an unreachable Housing brush")
+    {
+        housing_ensure_level(false);
+        env.grid(ambiguous_spawn) = DNGN_ROCK_WALL;
+        REQUIRE_FALSE(you.see_cell_no_trans(third_passage));
+
+        REQUIRE(wizard_apply_housing_terrain_brush(
+                    third_passage, DNGN_STONE_WALL, 1)
+                == housing_terrain_brush_result::rejected);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_ROCK_WALL);
+        REQUIRE(env.grid(third_passage) == DNGN_FLOOR);
+    }
+
+    SECTION("out-of-range Housing brushes are rejected without mutation")
+    {
+        housing_ensure_level(false);
+        const coord_def far = old_start + coord_def(LOS_MAX_RANGE + 1, 0);
+        REQUIRE(map_bounds(far));
+        const dungeon_feature_type old_far_feat = env.grid(far);
+
+        REQUIRE(wizard_apply_housing_terrain_brush(
+                    far, DNGN_STONE_WALL, 1)
+                == housing_terrain_brush_result::rejected);
+        REQUIRE(env.grid(far) == old_far_feat);
+    }
+
+    SECTION("non-owner Housing edit checks are read-only")
+    {
+        const dungeon_feature_type old_feat = env.grid(ambiguous_spawn);
+        unwind_var<game_type> non_housing(crawl_state.type,
+                                          GAME_TYPE_NORMAL);
+        REQUIRE_FALSE(housing_can_edit(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == old_feat);
     }
 
     SECTION("one bare runelight is authenticated and used")

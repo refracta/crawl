@@ -38,6 +38,7 @@
 #include "end.h"
 #include "env.h"
 #include "errors.h"
+#include "feature.h"
 #include "files.h"
 #include "god-companions.h"
 #include "god-passive.h"
@@ -2308,17 +2309,33 @@ bool housing_can_edit(const coord_def &pos)
 {
     if (!housing_is_owner() || !map_bounds(pos) || actor_at(pos)
         || env.igrid(pos) != NON_ITEM
-        || !env.markers.get_markers_at(pos).empty())
+        || !env.markers.get_markers_at(pos).empty()
+        || env.shop.find(pos) != env.shop.end())
     {
         return false;
     }
-    return !housing_is_spawn(pos)
-        && (housing_feature_allowed(env.grid(pos))
-            || env.grid(pos) == DNGN_ABANDONED_SHOP);
+    housing_ensure_level();
+    return housing_can_edit_ensured(pos);
+}
+
+bool housing_can_edit_ensured(const coord_def &pos)
+{
+    if (!housing_is_owner() || !map_bounds(pos) || actor_at(pos)
+        || env.igrid(pos) != NON_ITEM
+        || !env.markers.get_markers_at(pos).empty()
+        || env.shop.find(pos) != env.shop.end())
+    {
+        return false;
+    }
+    const dungeon_feature_type feat = env.grid(pos);
+    return !_raw_stored_spawns_contain(pos) && is_valid_feature_type(feat)
+        && (housing_feature_allowed(feat) || feat == DNGN_ABANDONED_SHOP);
 }
 
 bool housing_feature_allowed(dungeon_feature_type feat)
 {
+    if (!is_valid_feature_type(feat))
+        return false;
     if (feat_is_altar(feat))
         return true;
 

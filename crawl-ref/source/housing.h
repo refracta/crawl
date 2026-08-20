@@ -106,6 +106,9 @@ bool housing_toggle_spawn_point(const coord_def &pos);
 // directly to floor. The final spawn point itself is always protected.
 bool housing_clear_terrain(const coord_def &pos);
 bool housing_can_edit(const coord_def &pos);
+// Cheap predicate for an already authenticated Housing level. Call
+// housing_ensure_level() once before using it for a batch or live preview.
+bool housing_can_edit_ensured(const coord_def &pos);
 bool housing_feature_allowed(dungeon_feature_type feat);
 dungeon_feature_type housing_last_feature();
 void housing_set_last_feature(dungeon_feature_type feat);

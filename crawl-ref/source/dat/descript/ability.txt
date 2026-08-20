@@ -1150,9 +1150,10 @@ tile.
 %%%%
 Build housing terrain ability
 
-Places the terrain selected with Set housing terrain to build. Space, Enter,
-and . place terrain while keeping the targeting cursor open; press Esc when
-finished.
+Places the terrain selected with Set housing terrain to build. + and - resize
+the square brush from 1x1 through 8x8. Space, Enter, and . place the entire
+brush while keeping the targeting cursor open; press Esc when finished. If any
+square in the brush is protected or unreachable, nothing is changed.
 %%%%
 Clear housing terrain to floor ability
 
