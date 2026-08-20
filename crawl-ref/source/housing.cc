@@ -2128,12 +2128,6 @@ bool housing_create_monster()
         mpr("That monster cannot be created in Housing.");
         return false;
     }
-    if (mons_is_unique(type) && you.unique_creatures[type])
-    {
-        mpr("That unique monster has already been created for this character.");
-        return false;
-    }
-
     // Match the wizard flow: settle the requested type first, then enter a
     // WebTiles-compatible cell targeter. Quivered activation reaches this same
     // chooser instead of borrowing hostile autofight targeting.
@@ -2178,7 +2172,8 @@ bool housing_create_monster()
     }
 
     mgen_data mg(type, BEH_HOSTILE, place, MHITYOU,
-                 MG_FORBID_BANDS | MG_FORCE_PLACE);
+                 MG_FORBID_BANDS | MG_FORCE_PLACE
+                 | MG_IGNORE_UNIQUE_STATUS);
     mg.extra_flags |= MF_NO_REWARD;
     monster *created = create_monster(mg);
     if (!created)

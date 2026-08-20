@@ -594,6 +594,11 @@ static string _milestone_kill_verb(killer_type killer)
 
 void record_monster_defeat(const monster* mons, killer_type killer)
 {
+    // Housing editor fixtures are disposable and can be recreated freely,
+    // including uniques. Never turn their death, pacification, binding, or
+    // other defeat paths into permanent notes or unique milestones.
+    if (housing_monster_was_created(*mons))
+        return;
     if (crawl_state.game_is_arena())
         return;
     if (RESET_KILL(killer))
@@ -2642,7 +2647,7 @@ item_def* monster_die(monster& mons, killer_type killer,
     const bool was_banished  = (killer == KILL_BANISHED);
     const bool mons_reset    = RESET_KILL(killer);
     // Whether to record the kill and consider leaving a corpse/gold.
-    bool count_kill = !summoned && !timeout
+    bool count_kill = !housing_fixture && !summoned && !timeout
                             && !mons_reset
                             && !mons_is_tentacle_segment(mons.type);
     const bool real_death    = !(timeout && mons.is_abjurable())
@@ -3601,7 +3606,10 @@ item_def* monster_die(monster& mons, killer_type killer,
     if (count_kill && !was_banished && !spectralised && !corpse_consumed)
         corpse = place_corpse_or_gold(mons, false, suppress_corpse);
 
-    if (mons_is_rider(mons.type) && !was_banished)
+    // Housing editor fixtures are self-contained actors. Their synthetic
+    // mount-death pass would lose the Housing marker and could leak an
+    // ordinary kill/note for the mount into the character's history.
+    if (!housing_fixture && mons_is_rider(mons.type) && !was_banished)
     {
         item_def* mount_corpse = mounted_kill(&mons, mons_mount_type(mons.type), killer, killer_index);
         if (!corpse)
@@ -3906,6 +3914,16 @@ item_def* mounted_kill(monster* real_mon, monster_type mc, killer_type killer,
         dprf("Mounted kill: marking the other monster as reaped as well.");
         mon.props[REAPING_DAMAGE_KEY].get_int() = real_mon->props[REAPING_DAMAGE_KEY].get_int();
         mon.props[REAPER_KEY].get_int() = real_mon->props[REAPER_KEY].get_int();
+    }
+
+    // Housing riders are editor fixtures, not two ordinary kills. Their
+    // mid-combat split has already updated the surviving actor; clear the
+    // dead half's annotation, but don't leak its synthetic death into notes,
+    // kill history, experience, corpses, or other death effects.
+    if (housing_monster_was_created(*real_mon))
+    {
+        remove_unique_annotation(&mon);
+        return nullptr;
     }
 
     return monster_die(mon, killer, killer_index, false, true);

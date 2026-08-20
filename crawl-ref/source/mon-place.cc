@@ -791,7 +791,8 @@ monster* place_monster(mgen_data mg, bool force_pos, bool dont_place)
         // We don't want to place a unique that has already been
         // generated.
         if (mons_is_unique(band_template.cls)
-            && you.unique_creatures[band_template.cls])
+            && you.unique_creatures[band_template.cls]
+            && !(band_template.flags & MG_IGNORE_UNIQUE_STATUS))
         {
             continue;
         }
@@ -913,8 +914,9 @@ static monster* _place_monster_aux(const mgen_data &mg, const monster *leader,
     coord_def fpos;
 
     // Some sanity checks.
-    if (mons_is_unique(mg.cls) && you.unique_creatures[mg.cls]
-            && !crawl_state.game_is_arena()
+    if ((mons_is_unique(mg.cls) && you.unique_creatures[mg.cls]
+         && !(mg.flags & MG_IGNORE_UNIQUE_STATUS)
+         && !crawl_state.game_is_arena())
         || mons_class_flag(mg.cls, M_CANT_SPAWN))
     {
         die("invalid monster to place: %s (%d)", mons_class_name(mg.cls), mg.cls);
@@ -1132,7 +1134,8 @@ static monster* _place_monster_aux(const mgen_data &mg, const monster *leader,
     // The return of Boris is now handled in monster_die(). Not setting
     // this for Boris here allows for multiple Borises in the dungeon at
     // the same time. - bwr
-    if (mons_is_unique(mg.cls))
+    if (mons_is_unique(mg.cls)
+        && !(mg.flags & MG_IGNORE_UNIQUE_STATUS))
         you.unique_creatures.set(mg.cls);
 
     if (mons_class_flag(mg.cls, M_INVIS))

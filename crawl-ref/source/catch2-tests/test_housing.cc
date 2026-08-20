@@ -5,18 +5,24 @@
 #include "ability-type.h"
 #include "branch.h"
 #include "cloud.h"
+#include "dgn-overview.h"
 #include "dungeon.h"
 #include "env.h"
 #include "feature.h"
 #include "files.h"
 #include "housing.h"
+#include "item-status-flag-type.h"
 #include "items.h"
 #include "jobs.h"
 #include "losparam.h"
 #include "mapmark.h"
 #include "menu.h"
+#include "mgen-data.h"
+#include "mon-death.h"
+#include "mon-place.h"
 #include "mon-util.h"
 #include "monster.h"
+#include "notes.h"
 #include "options.h"
 #include "package.h"
 #include "player.h"
@@ -29,6 +35,9 @@
 #include "viewgeom.h"
 #include "wizard.h"
 #include "zot.h"
+
+extern map<level_id, string> level_uniques;
+extern set<pair<string, level_id>> auto_unique_annotations;
 
 #ifndef TARGET_OS_WINDOWS
 #include <sys/stat.h>
@@ -281,6 +290,253 @@ TEST_CASE("Housing monster policy rejects only unsafe actor payloads",
     REQUIRE_FALSE(housing_monster_type_allowed(MONS_PROGRAM_BUG));
     REQUIRE_FALSE(housing_monster_type_allowed(MONS_TEST_SPAWNER));
     REQUIRE_FALSE(housing_monster_type_allowed(MONS_ZOMBIE));
+}
+
+TEST_CASE("Housing generation preserves unique creature history",
+          "[single-file]")
+{
+    init_show_table();
+    init_monsters();
+    const coord_def player_pos(20, 20);
+    const coord_def first_pos(24, 20);
+    const coord_def second_pos(25, 20);
+    unwind_var<game_type> saved_game_type(crawl_state.type,
+                                          GAME_TYPE_HOUSING);
+    unwind_var<bool> saved_on_level(you.on_current_level, true);
+    unwind_var<coord_def> saved_player_pos(you.position, player_pos);
+    unwind_var<unique_creature_list> saved_uniques(you.unique_creatures);
+    const auto saved_unique_items = you.unique_items;
+    unwinder restore_unique_items = [saved_unique_items]() {
+        you.unique_items = saved_unique_items;
+    };
+    const auto saved_level_uniques = level_uniques;
+    const auto saved_auto_unique_annotations = auto_unique_annotations;
+    unwinder restore_unique_annotations = [saved_level_uniques,
+                                            saved_auto_unique_annotations]() {
+        level_uniques = saved_level_uniques;
+        auto_unique_annotations = saved_auto_unique_annotations;
+    };
+    unwind_var<dungeon_feature_type> saved_first_feat(env.grid(first_pos),
+                                                       DNGN_FLOOR);
+    unwind_var<dungeon_feature_type> saved_second_feat(env.grid(second_pos),
+                                                        DNGN_FLOOR);
+    unwind_var<unsigned short> saved_first_mon(env.mgrid(first_pos),
+                                                NON_MONSTER);
+    unwind_var<unsigned short> saved_second_mon(env.mgrid(second_pos),
+                                                 NON_MONSTER);
+    unwind_var<int> saved_first_item(env.igrid(first_pos), NON_ITEM);
+    unwind_var<int> saved_second_item(env.igrid(second_pos), NON_ITEM);
+
+    REQUIRE(env.grid(first_pos) == DNGN_FLOOR);
+    REQUIRE(env.grid(second_pos) == DNGN_FLOOR);
+    REQUIRE(mons_class_can_pass(MONS_MAGGIE, env.grid(first_pos)));
+    REQUIRE(mons_class_can_pass(MONS_MARGERY, env.grid(second_pos)));
+    REQUIRE(monster_at(first_pos) == nullptr);
+    REQUIRE(monster_at(second_pos) == nullptr);
+
+    vector<monster*> generated;
+    unwinder remove_generated = [&generated]() {
+        for (monster *mons : generated)
+            if (mons && mons->alive())
+                monster_die(*mons, KILL_RESET, NON_MONSTER, true, false,
+                            true);
+    };
+
+    auto unique_history = []() {
+        vector<bool> result;
+        result.reserve(NUM_MONSTERS);
+        for (int type = 0; type < NUM_MONSTERS; ++type)
+            result.push_back(you.unique_creatures[type]);
+        return result;
+    };
+    auto place_unique = [&](monster_type type, const coord_def &pos,
+                            bool ignore_unique_status) {
+        mgen_flags flags = MG_FORBID_BANDS | MG_FORCE_PLACE;
+        if (ignore_unique_status)
+            flags |= MG_IGNORE_UNIQUE_STATUS;
+        mgen_data mg(type, BEH_HOSTILE, pos, MHITYOU, flags);
+        monster *created = create_monster(mg);
+        REQUIRE(created != nullptr);
+        generated.push_back(created);
+        return created;
+    };
+
+    SECTION("fresh history permits both ages and respawning")
+    {
+        you.unique_creatures.reset();
+        you.unique_creatures.set(MONS_SIGMUND);
+        const vector<bool> expected = unique_history();
+
+        monster *maggie = place_unique(MONS_MAGGIE, first_pos, true);
+        REQUIRE(unique_history() == expected);
+        REQUIRE(place_unique(MONS_MARGERY, second_pos, true) != nullptr);
+        REQUIRE(unique_history() == expected);
+
+        monster_die(*maggie, KILL_RESET, NON_MONSTER, true, false, true);
+        REQUIRE_FALSE(maggie->alive());
+        REQUIRE(place_unique(MONS_MAGGIE, first_pos, true) != nullptr);
+        REQUIRE(unique_history() == expected);
+    }
+
+    SECTION("legacy paired history remains bit-identical")
+    {
+        you.unique_creatures.reset();
+        you.unique_creatures.set(MONS_MAGGIE);
+        you.unique_creatures.set(MONS_SIGMUND);
+        const vector<bool> expected = unique_history();
+        REQUIRE(you.unique_creatures[MONS_MAGGIE]);
+        REQUIRE(you.unique_creatures[MONS_MARGERY]);
+
+        REQUIRE(place_unique(MONS_MAGGIE, first_pos, true) != nullptr);
+        REQUIRE(place_unique(MONS_MARGERY, second_pos, true) != nullptr);
+        REQUIRE(unique_history() == expected);
+    }
+
+    SECTION("normal generation still records the paired unique")
+    {
+        crawl_state.type = GAME_TYPE_NORMAL;
+        you.unique_creatures.reset();
+        REQUIRE(place_unique(MONS_MAGGIE, first_pos, false) != nullptr);
+        REQUIRE(you.unique_creatures[MONS_MAGGIE]);
+        REQUIRE(you.unique_creatures[MONS_MARGERY]);
+    }
+}
+
+TEST_CASE("Housing rider defeat paths do not synthesize persistent history",
+          "[single-file]")
+{
+    init_show_table();
+    init_monsters();
+    const coord_def player_pos(20, 20);
+    const coord_def rider_pos(24, 20);
+    unwind_var<game_type> saved_game_type(crawl_state.type,
+                                          GAME_TYPE_HOUSING);
+    unwind_var<bool> saved_need_save(crawl_state.need_save, true);
+    unwind_var<bool> saved_on_level(you.on_current_level, true);
+    unwind_var<coord_def> saved_player_pos(you.position, player_pos);
+    unwind_var<branch_type> saved_branch(you.where_are_you, BRANCH_DUNGEON);
+    unwind_var<int> saved_depth(you.depth, 1);
+    unwind_var<unique_creature_list> saved_uniques(you.unique_creatures);
+    unwind_var<KillMaster> saved_kills(you.kills, KillMaster());
+    unwind_var<vector<text_pattern>> saved_note_monsters(
+        Options.note_monsters,
+        vector<text_pattern>{ text_pattern("ghost moth"),
+                              text_pattern("Goji") });
+    unwind_var<dungeon_feature_type> saved_feat(env.grid(rider_pos),
+                                                 DNGN_FLOOR);
+    unwind_var<unsigned short> saved_mon(env.mgrid(rider_pos), NON_MONSTER);
+    unwind_var<int> saved_item(env.igrid(rider_pos), NON_ITEM);
+    const auto saved_unique_items = you.unique_items;
+    unwinder restore_unique_items = [saved_unique_items]() {
+        you.unique_items = saved_unique_items;
+    };
+    const CrawlHashTable saved_properties = you.props;
+    unwinder restore_properties = [saved_properties]() {
+        you.props = saved_properties;
+    };
+    const vector<Note> saved_notes = note_list;
+    const bool saved_notes_active = notes_are_active();
+    unwinder restore_notes = [saved_notes, saved_notes_active]() {
+        note_list = saved_notes;
+        activate_notes(saved_notes_active);
+    };
+    const auto saved_level_uniques = level_uniques;
+    const auto saved_auto_unique_annotations = auto_unique_annotations;
+    unwinder restore_unique_annotations = [saved_level_uniques,
+                                            saved_auto_unique_annotations]() {
+        level_uniques = saved_level_uniques;
+        auto_unique_annotations = saved_auto_unique_annotations;
+    };
+
+    REQUIRE(env.grid(rider_pos) == DNGN_FLOOR);
+    REQUIRE(mons_class_can_pass(MONS_GOJI, env.grid(rider_pos)));
+    REQUIRE(monster_at(rider_pos) == nullptr);
+
+    you.unique_creatures.reset();
+    you.unique_creatures.set(MONS_SIGMUND);
+    auto unique_history = []() {
+        vector<bool> result;
+        result.reserve(NUM_MONSTERS);
+        for (int type = 0; type < NUM_MONSTERS; ++type)
+            result.push_back(you.unique_creatures[type]);
+        return result;
+    };
+    const vector<bool> expected_uniques = unique_history();
+
+    mgen_data mg(MONS_GOJI, BEH_HOSTILE, rider_pos, MHITYOU,
+                 MG_FORBID_BANDS | MG_FORCE_PLACE
+                 | MG_IGNORE_UNIQUE_STATUS);
+    mg.extra_flags |= MF_NO_REWARD;
+    monster *goji = create_monster(mg);
+    REQUIRE(goji != nullptr);
+    unwinder remove_goji = [&goji]() {
+        if (goji && goji->alive())
+            monster_die(*goji, KILL_RESET, NON_MONSTER, true, false, true);
+    };
+    REQUIRE(mons_is_rider(goji->type));
+    REQUIRE(mons_mount_type(goji->type) == MONS_GHOST_MOTH);
+    goji->props["housing_created_monster"] = true;
+    goji->props[NEVER_CORPSE_KEY] = true;
+    for (mon_inv_iterator item(*goji); item; ++item)
+        if (!is_unrandom_artefact(*item))
+            item->flags |= ISFLAG_SUMMONED;
+    REQUIRE(housing_monster_was_created(*goji));
+    REQUIRE(unique_history() == expected_uniques);
+
+    note_list.clear();
+    activate_notes(true);
+    you.props["last_milestone"] = "housing rider sentinel";
+    you.props["last_milestone_type"] = "housing.test";
+    you.props["last_milestone_turn"] = you.num_turns - 1;
+
+    auto require_history_unchanged = [&]() {
+        REQUIRE(you.kills.empty());
+        REQUIRE(note_list.empty());
+        REQUIRE(you.props["last_milestone"].get_string()
+                == "housing rider sentinel");
+        REQUIRE(you.props["last_milestone_type"].get_string()
+                == "housing.test");
+        REQUIRE(you.props["last_milestone_turn"].get_int()
+                == you.num_turns - 1);
+        REQUIRE(unique_history() == expected_uniques);
+    };
+
+    SECTION("full death skips the synthetic mount death")
+    {
+        monster_die(*goji, KILL_YOU, NON_MONSTER, true, false, true);
+        REQUIRE_FALSE(goji->alive());
+        require_history_unchanged();
+    }
+
+    SECTION("mid-combat split skips the synthetic rider death")
+    {
+        const level_id level = level_id::current();
+        const auto annotation = make_pair(string("Goji"), level);
+        set_unique_annotation(goji, level);
+        REQUIRE(auto_unique_annotations.count(annotation) == 1);
+        REQUIRE(level_uniques.count(level) == 1);
+        REQUIRE(level_uniques[level].find("Goji") != string::npos);
+
+        const int starting_hp = goji->hit_points;
+        REQUIRE(starting_hp == goji->max_hit_points);
+        REQUIRE(starting_hp > 5);
+        const int requested_damage = starting_hp * 3 / 5 + 1;
+        REQUIRE(requested_damage > 0);
+        REQUIRE(requested_damage < starting_hp);
+        const int damage = goji->hurt(nullptr, requested_damage,
+                                      BEAM_MMISSILE, KILLED_BY_SOMETHING,
+                                      "", "", false, false);
+        REQUIRE(damage > 0);
+        REQUIRE(damage < starting_hp);
+        REQUIRE(goji->alive());
+        REQUIRE(goji->type == MONS_GHOST_MOTH);
+        REQUIRE(housing_monster_was_created(*goji));
+        REQUIRE(auto_unique_annotations.count(annotation) == 0);
+        const auto remaining = level_uniques.find(level);
+        REQUIRE((remaining == level_uniques.end()
+                 || remaining->second.find("Goji") == string::npos));
+        require_history_unchanged();
+    }
 }
 
 TEST_CASE("Housing ability ids remain append-only", "[single-file]")

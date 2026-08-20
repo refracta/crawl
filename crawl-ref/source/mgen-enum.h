@@ -184,5 +184,7 @@ enum mgen_flag
     MG_COPY_PARENT  = 0x1000, ///< if the summoner is summoned or charmed, will
                               ///  take on those properties themselves
     MG_AUTOLURK     = 0x2000, ///< if this monster is a lurker, lurk upon creation
+    MG_IGNORE_UNIQUE_STATUS = 0x4000, ///< bypass prior-created checks and do
+                                      ///  not update you.unique_creatures
 };
 DEF_BITFIELD(mgen_flags, mgen_flag);
