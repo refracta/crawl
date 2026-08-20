@@ -142,6 +142,10 @@ bool housing_trigger_visitor_strip(actor &triggerer);
 // unsafe derived actors are rejected, and target invariants are rechecked at
 // mutation time.
 bool housing_create_monster();
+// Immediately remove exactly one live editor-created monster at the selected
+// coordinate. Generated disposable gear is destroyed, later-acquired items
+// are dropped, and ordinary death effects/history are never run.
+bool housing_remove_monster(const coord_def &pos);
 bool housing_monster_type_allowed(monster_type type);
 // This role-independent identity survives publication and visitor loading so
 // ordinary death cleanup can suppress native monster lifecycle side effects.

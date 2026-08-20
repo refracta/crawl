@@ -54,6 +54,7 @@
 #include "monster.h"
 #include "mon-death.h"
 #include "mon-place.h"
+#include "mon-poly.h"
 #include "mon-tentacle.h"
 #include "mon-transit.h"
 #include "mon-util.h"
@@ -79,6 +80,7 @@
 #include "traps.h"
 #include "travel.h"
 #include "version.h"
+#include "view.h"
 #include "rltiles/tiledef-dngn.h"
 #ifdef USE_TILE_WEB
 #include "tileweb.h"
@@ -2701,7 +2703,12 @@ bool housing_monster_type_allowed(monster_type type)
         || mons_is_pghost(type)
         || mons_class_is_test(type) || mons_class_is_zombified(type)
         || mons_is_projectile(type) || mons_is_seeker(type)
-        || mons_is_tentacle_head(type)
+        // A Housing owner keeps editor-created monsters completely inert,
+        // so a stored kraken head cannot create child tentacles or ink.
+        // Visitors act on a disposable snapshot and may fight the kraken
+        // normally. Keep every other tentacle head, and all directly
+        // creatable tentacle pieces, out of canonical maps.
+        || (mons_is_tentacle_head(type) && type != MONS_KRAKEN)
         || mons_is_tentacle_or_tentacle_segment(type)
         || mons_class_flag(type, M_CANT_SPAWN | M_UNFINISHED | M_UNSTABLE
                                  | M_PERIPHERAL | M_ANCESTOR | M_AVATAR))
@@ -2846,6 +2853,67 @@ bool housing_create_monster()
         created_any = true;
     }
     return created_any;
+}
+
+bool housing_remove_monster(const coord_def &pos)
+{
+    if (!housing_authorize_action("remove a monster", 0))
+        return false;
+
+    // The targeter is advisory. Keep the public mutation boundary just as
+    // strict as monster placement so replayed/scripted targets cannot remove
+    // an actor outside the visible editor radius.
+    if (!map_bounds(pos) || !in_bounds(pos)
+        || (pos - you.pos()).rdist() > LOS_MAX_RANGE
+        || !you.see_cell_no_trans(pos))
+    {
+        mpr("That square is outside the Housing editor's reach.");
+        return false;
+    }
+
+    monster *placed = monster_at(pos);
+    if (!placed || !placed->alive())
+    {
+        mpr("There is no Housing-created monster there.");
+        return false;
+    }
+    if (!_housing_created_monster(*placed))
+    {
+        mpr("That monster was not created by the Housing editor and is "
+            "protected.");
+        return false;
+    }
+
+    const string removed_name = placed->name(DESC_THE);
+
+    // Generated editor equipment was marked ISFLAG_SUMMONED at creation, so
+    // this battle-tested path destroys only that disposable gear. Anything
+    // picked up later (including ordinary or unrandom player items) is
+    // unlinked from the monster and dropped on its square instead.
+    monster_drop_things(placed, false);
+
+    // This is an editor deletion, not a kill. Perform the relationship/grid
+    // cleanup shared by ordinary removal, but never enter monster_die(): no
+    // Lua/death event, corpse, death cloud, derived mount, kill ledger, note,
+    // milestone, XP, or on-kill effect is produced. monster_cleanup also
+    // removes any attached tentacles before resetting the actor slot.
+    placed->stop_being_caught(true);
+    placed->stop_being_constricted(true);
+    you.remove_beholder(*placed);
+    you.remove_fearmonger(placed);
+    remove_unique_annotation(placed);
+    if (you.prev_targ == placed->mid)
+    {
+        you.prev_targ = MID_NOBODY;
+        crawl_state.cancel_cmd_repeat();
+    }
+    monster_cleanup(placed, true);
+
+    StashTrack.update_stash(pos);
+    if (you.see_cell(pos))
+        view_update_at(pos);
+    mprf("%s is removed from the Housing map.", removed_name.c_str());
+    return true;
 }
 
 bool housing_can_create_shop()

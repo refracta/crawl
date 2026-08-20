@@ -792,6 +792,9 @@ static vector<ability_def> &_get_ability_list()
             abflag::instant | abflag::target | abflag::not_self },
         { ABIL_HOUSING_SHOW_COORDINATES, "Show Housing coordinates",
             0, 0, 0, -1, {}, abflag::instant },
+        { ABIL_HOUSING_REMOVE_MONSTER, "Remove a housing monster",
+            0, 0, 0, LOS_MAX_RANGE, {},
+            abflag::instant | abflag::target },
 #ifdef WIZARD
         { ABIL_WIZ_BUILD_TERRAIN, "Build terrain",
             0, 0, 0, LOS_MAX_RANGE, {}, abflag::instant },
@@ -2746,6 +2749,9 @@ unique_ptr<targeter> find_ability_targeter(ability_type ability)
     case ABIL_HOUSING_CREATE_VISITOR_STRIP:
         return make_unique<targeter_smite>(&you, ability_range(ability),
                                             0, 0, true, false, false);
+    case ABIL_HOUSING_REMOVE_MONSTER:
+        return make_unique<targeter_smite>(&you, ability_range(ability),
+                                            0, 0, true, false, true);
 
     // Limited radius:
     case ABIL_ZIN_SANCTUARY:
@@ -3021,6 +3027,7 @@ static bool _housing_repeating_editor_ability(ability_type ability)
     case ABIL_HOUSING_TOGGLE_VISITOR_WALL:
     case ABIL_HOUSING_MANAGE_SPAWNS:
     case ABIL_HOUSING_CREATE_VISITOR_STRIP:
+    case ABIL_HOUSING_REMOVE_MONSTER:
         return true;
     default:
         return false;
@@ -4488,6 +4495,13 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
              you.pos().x, you.pos().y);
         return spret::success;
 
+    case ABIL_HOUSING_REMOVE_MONSTER:
+        if (!target || !housing_remove_monster(target->target))
+            return spret::abort;
+        if (!defer_housing_checkpoint)
+            housing_checkpoint();
+        return spret::success;
+
 #ifdef WIZARD
     case ABIL_WIZ_BUILD_TERRAIN:
     {
@@ -4907,6 +4921,7 @@ vector<talent> your_talents(bool include_unusable, bool ignore_piety)
             ABIL_HOUSING_MANAGE_SPAWNS,
             ABIL_HOUSING_CREATE_VISITOR_STRIP,
             ABIL_HOUSING_SHOW_COORDINATES,
+            ABIL_HOUSING_REMOVE_MONSTER,
             ABIL_EVOKE_BLINK,
             ABIL_EVOKE_TURN_INVISIBLE,
             ABIL_EVOKE_DISPATER,
@@ -5170,6 +5185,10 @@ int find_ability_slot(const ability_type abil, char firstletter)
 
     case ABIL_HOUSING_SHOW_COORDINATES:
         first_slot = letter_to_index('C');
+        break;
+
+    case ABIL_HOUSING_REMOVE_MONSTER:
+        first_slot = letter_to_index('K');
         break;
 
 #ifdef WIZARD

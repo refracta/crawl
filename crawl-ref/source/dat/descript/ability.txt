@@ -1167,6 +1167,14 @@ Enter, and . place monsters while keeping the targeting cursor open; press Esc
 when finished. Monsters remain inert for their owner and act normally for
 visitors.
 %%%%
+Remove a housing monster ability
+
+Immediately removes an editor-created Housing monster from the selected
+square. Generated disposable equipment vanishes, but items acquired later are
+dropped on that square. Ordinary monsters are protected. Space, Enter, and .
+remove monsters while keeping the targeting cursor open; press Esc when
+finished.
+%%%%
 Toggle an owner-only barrier ability
 
 Places or removes a see-through barrier that blocks the owner but opens for

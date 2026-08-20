@@ -2,6 +2,7 @@
 
 #include "AppHdr.h"
 
+#include "ability.h"
 #include "ability-type.h"
 #include "branch.h"
 #include "cloud.h"
@@ -19,8 +20,10 @@
 #include "mapmark.h"
 #include "menu.h"
 #include "mgen-data.h"
+#include "mon-act.h"
 #include "mon-death.h"
 #include "mon-place.h"
+#include "mon-tentacle.h"
 #include "mon-util.h"
 #include "monster.h"
 #include "notes.h"
@@ -30,7 +33,9 @@
 #include "state.h"
 #include "status.h"
 #include "tags.h"
+#include "target.h"
 #include "shopping.h"
+#include "spl-util.h"
 #include "unwind.h"
 #include "terrain.h"
 #include "tile-env.h"
@@ -285,13 +290,20 @@ TEST_CASE("Housing monster policy rejects only unsafe actor payloads",
           "[single-file]")
 {
     init_monsters();
+    init_mon_name_cache();
     REQUIRE(housing_monster_type_allowed(MONS_RAT));
     REQUIRE(housing_monster_type_allowed(MONS_PLANT));
     REQUIRE(housing_monster_type_allowed(MONS_SIGMUND));
+    REQUIRE(get_monster_by_name("kraken") == MONS_KRAKEN);
+    REQUIRE(housing_monster_type_allowed(MONS_KRAKEN));
 
     REQUIRE_FALSE(housing_monster_type_allowed(MONS_PROGRAM_BUG));
     REQUIRE_FALSE(housing_monster_type_allowed(MONS_TEST_SPAWNER));
     REQUIRE_FALSE(housing_monster_type_allowed(MONS_ZOMBIE));
+    REQUIRE_FALSE(housing_monster_type_allowed(MONS_TENTACLED_STARSPAWN));
+    REQUIRE_FALSE(housing_monster_type_allowed(MONS_KRAKEN_TENTACLE));
+    REQUIRE_FALSE(
+        housing_monster_type_allowed(MONS_KRAKEN_TENTACLE_SEGMENT));
 }
 
 TEST_CASE("Housing generation preserves unique creature history",
@@ -552,7 +564,8 @@ TEST_CASE("Housing ability ids remain append-only", "[single-file]")
     REQUIRE(static_cast<int>(ABIL_HOUSING_MANAGE_SPAWNS) == 9011);
     REQUIRE(static_cast<int>(ABIL_HOUSING_CREATE_VISITOR_STRIP) == 9012);
     REQUIRE(static_cast<int>(ABIL_HOUSING_SHOW_COORDINATES) == 9013);
-    REQUIRE(ABIL_LAST_HOUSING == ABIL_HOUSING_SHOW_COORDINATES);
+    REQUIRE(static_cast<int>(ABIL_HOUSING_REMOVE_MONSTER) == 9014);
+    REQUIRE(ABIL_LAST_HOUSING == ABIL_HOUSING_REMOVE_MONSTER);
 }
 
 TEST_CASE("Housing editor self-targeting rejects without cancelling",
@@ -1185,6 +1198,295 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE(result.detail.find("rat") != string::npos);
         REQUIRE(result.message.find("(22,20)") != string::npos);
         REQUIRE(result.message.find("type") != string::npos);
+    }
+
+    SECTION("a Housing kraken is stored as an inert head only")
+    {
+        housing_ensure_level(false);
+        init_monsters();
+        init_spell_descs();
+        vector<pair<coord_def, unsigned int>> saved_map_ids;
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+            {
+                const coord_def pos = ambiguous_spawn + coord_def(dx, dy);
+                saved_map_ids.emplace_back(pos, env.level_map_ids(pos));
+                env.level_map_ids(pos) = INVALID_MAP_INDEX;
+            }
+        unwinder restore_map_ids = [&saved_map_ids]() {
+            for (const auto &entry : saved_map_ids)
+                env.level_map_ids(entry.first) = entry.second;
+        };
+        REQUIRE_FALSE(monster_habitable_grid(MONS_KRAKEN,
+                                              ambiguous_spawn));
+        env.grid(ambiguous_spawn) = DNGN_DEEP_WATER;
+        REQUIRE(monster_habitable_grid(MONS_KRAKEN, ambiguous_spawn));
+
+        mgen_data mg(MONS_KRAKEN, BEH_HOSTILE, ambiguous_spawn, MHITYOU,
+                     MG_FORBID_BANDS | MG_FORCE_PLACE
+                     | MG_IGNORE_UNIQUE_STATUS);
+        mg.extra_flags |= MF_NO_REWARD;
+        monster *kraken = create_monster(mg);
+        REQUIRE(kraken != nullptr);
+        unwinder remove_kraken = [&kraken]() {
+            if (kraken && kraken->alive())
+                monster_die(*kraken, KILL_RESET, NON_MONSTER, true, false,
+                            true);
+        };
+        kraken->props["housing_created_monster"] = true;
+        kraken->props[NEVER_CORPSE_KEY] = true;
+
+        REQUIRE(housing_is_owner());
+        REQUIRE(housing_monster_is_owner_inert(*kraken));
+        REQUIRE(housing_validate_current_map().valid());
+        auto child_count = [&kraken]() {
+            return std::count_if(
+                menv_real.begin(), menv_real.end(),
+                [&kraken](const monster &mons) {
+                    return mons.alive()
+                           && mons.is_child_tentacle_of(kraken);
+                });
+        };
+        REQUIRE(child_count() == 0);
+
+        // The canonical editor runs ordinary monster turns, but the common
+        // Housing owner guard must stop the head before its tentacle/ink
+        // spells. Visitors receive a disposable snapshot and do not take this
+        // branch, so their kraken still fights normally.
+        for (int turn = 0; turn < 3; ++turn)
+        {
+            kraken->speed_increment = 100;
+            handle_monsters(false);
+            REQUIRE(kraken->alive());
+            REQUIRE(kraken->pos() == ambiguous_spawn);
+            REQUIRE(child_count() == 0);
+            REQUIRE(cloud_at(ambiguous_spawn) == nullptr);
+            REQUIRE(env.grid(ambiguous_spawn) == DNGN_DEEP_WATER);
+        }
+        REQUIRE(housing_validate_current_map().valid());
+
+        // Exercise the lower-level action used by an active visitor kraken.
+        // Its summoned children are deliberately not canonical Housing
+        // fixtures, and killing the stored head must clean all of them up.
+        mons_create_tentacles(kraken);
+        vector<monster*> children;
+        for (monster &mons : menv_real)
+            if (mons.alive() && mons.is_child_tentacle_of(kraken))
+                children.push_back(&mons);
+        REQUIRE_FALSE(children.empty());
+        for (monster *child : children)
+            REQUIRE_FALSE(housing_monster_was_created(*child));
+
+        monster_die(*kraken, KILL_RESET, NON_MONSTER, true, false, true);
+        REQUIRE_FALSE(kraken->alive());
+        for (monster *child : children)
+            REQUIRE_FALSE(child->alive());
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_DEEP_WATER);
+        REQUIRE(housing_validate_current_map().valid());
+    }
+
+    SECTION("editor removal is exact, lossless, and has no death history")
+    {
+        housing_ensure_level(false);
+        init_monsters();
+        init_spell_descs();
+
+        // Removal refreshes the zero-turn targeting view immediately. Keep
+        // this synthetic cell detached from unrelated vault metadata in the
+        // shared Catch environment, just like the tentacle sections below.
+        const unsigned int saved_map_id =
+            env.level_map_ids(ambiguous_spawn);
+        unwinder restore_map_id = [saved_map_id, ambiguous_spawn]() {
+            env.level_map_ids(ambiguous_spawn) = saved_map_id;
+        };
+        env.level_map_ids(ambiguous_spawn) = INVALID_MAP_INDEX;
+
+        unwind_var<KillMaster> saved_kills(you.kills, KillMaster());
+        const vector<Note> saved_notes = note_list;
+        const bool saved_notes_active = notes_are_active();
+        unwinder restore_notes = [saved_notes, saved_notes_active]() {
+            note_list = saved_notes;
+            activate_notes(saved_notes_active);
+        };
+        const CrawlHashTable saved_you_properties = you.props;
+        unwinder restore_you_properties = [saved_you_properties]() {
+            you.props = saved_you_properties;
+        };
+        const auto saved_level_uniques = level_uniques;
+        const auto saved_auto_unique_annotations = auto_unique_annotations;
+        unwinder restore_unique_annotations = [saved_level_uniques,
+                                                saved_auto_unique_annotations]() {
+            level_uniques = saved_level_uniques;
+            auto_unique_annotations = saved_auto_unique_annotations;
+        };
+
+        note_list.clear();
+        activate_notes(true);
+        you.props["last_milestone"] = "housing removal sentinel";
+        you.props["last_milestone_type"] = "housing.test";
+        you.props["last_milestone_turn"] = you.num_turns - 1;
+
+        // Empty squares and even malformed lookalikes are protected. The
+        // creator flag must be the exact authenticated boolean payload.
+        REQUIRE_FALSE(housing_remove_monster(template_spawn));
+        mgen_data ordinary_mg(MONS_RAT, BEH_HOSTILE, third_passage,
+                              MHITYOU, MG_FORBID_BANDS | MG_FORCE_PLACE);
+        monster *ordinary = create_monster(ordinary_mg);
+        REQUIRE(ordinary != nullptr);
+        unwinder remove_ordinary = [&ordinary]() {
+            if (ordinary && ordinary->alive())
+                monster_cleanup(ordinary, true);
+        };
+        ordinary->props["housing_created_monster"] = 1;
+        unique_ptr<targeter> remove_targeter =
+            find_ability_targeter(ABIL_HOUSING_REMOVE_MONSTER);
+        REQUIRE(remove_targeter != nullptr);
+        REQUIRE(remove_targeter->valid_aim(third_passage));
+        REQUIRE_FALSE(housing_remove_monster(third_passage));
+        REQUIRE(ordinary->alive());
+
+        mgen_data placed_mg(MONS_GOJI, BEH_HOSTILE, ambiguous_spawn,
+                            MHITYOU, MG_FORBID_BANDS | MG_FORCE_PLACE
+                            | MG_IGNORE_UNIQUE_STATUS);
+        placed_mg.extra_flags |= MF_NO_REWARD;
+        monster *placed = create_monster(placed_mg);
+        REQUIRE(placed != nullptr);
+        unwinder remove_placed = [&placed]() {
+            if (placed && placed->alive())
+                monster_die(*placed, KILL_RESET, NON_MONSTER, true, false,
+                            true);
+        };
+        placed->props["housing_created_monster"] = true;
+        placed->props[NEVER_CORPSE_KEY] = true;
+
+        vector<int> generated_items;
+        for (mon_inv_iterator item(*placed); item; ++item)
+        {
+            if (!is_unrandom_artefact(*item))
+            {
+                item->flags |= ISFLAG_SUMMONED;
+                generated_items.push_back(item->index());
+            }
+        }
+        REQUIRE_FALSE(generated_items.empty());
+
+        // Simulate an ordinary item acquired after editor placement. It must
+        // survive deletion on the ground, unlike the generated gear above.
+        item_def acquired_gold;
+        acquired_gold.clear();
+        acquired_gold.base_type = OBJ_GOLD;
+        acquired_gold.quantity = 17;
+        const int acquired_index =
+            copy_item_to_grid(acquired_gold, ambiguous_spawn);
+        REQUIRE(acquired_index != NON_ITEM);
+        unwinder remove_acquired = [acquired_index]() {
+            if (env.item[acquired_index].defined())
+                destroy_item(acquired_index, true);
+        };
+        REQUIRE(placed->inv[MSLOT_GOLD] == NON_ITEM);
+        unlink_item(acquired_index);
+        placed->inv[MSLOT_GOLD] = acquired_index;
+        env.item[acquired_index].set_holding_monster(*placed);
+        REQUIRE_FALSE(env.item[acquired_index].flags & ISFLAG_SUMMONED);
+
+        const auto unique_history = []() {
+            vector<bool> result;
+            result.reserve(NUM_MONSTERS);
+            for (int type = 0; type < NUM_MONSTERS; ++type)
+                result.push_back(you.unique_creatures[type]);
+            return result;
+        }();
+        const int live_before = std::count_if(
+            menv_real.begin(), menv_real.end(),
+            [](const monster &mons) { return mons.alive(); });
+
+        REQUIRE(housing_remove_monster(ambiguous_spawn));
+        REQUIRE_FALSE(placed->alive());
+        REQUIRE(monster_at(ambiguous_spawn) == nullptr);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(std::count_if(
+                    menv_real.begin(), menv_real.end(),
+                    [](const monster &mons) { return mons.alive(); })
+                == live_before - 1);
+        for (const int item : generated_items)
+            REQUIRE_FALSE(env.item[item].defined());
+        REQUIRE(env.item[acquired_index].defined());
+        REQUIRE(item_pos(env.item[acquired_index]) == ambiguous_spawn);
+        REQUIRE(env.item[acquired_index].quantity == 17);
+        for (stack_iterator item(ambiguous_spawn); item; ++item)
+            REQUIRE(item->base_type != OBJ_CORPSES);
+
+        // Direct cleanup must not manufacture Goji's mount or pass through
+        // any ordinary defeat/history path.
+        REQUIRE(you.kills.empty());
+        REQUIRE(note_list.empty());
+        REQUIRE(you.props["last_milestone"].get_string()
+                == "housing removal sentinel");
+        REQUIRE(you.props["last_milestone_type"].get_string()
+                == "housing.test");
+        REQUIRE(you.props["last_milestone_turn"].get_int()
+                == you.num_turns - 1);
+        const auto unique_history_after = []() {
+            vector<bool> result;
+            result.reserve(NUM_MONSTERS);
+            for (int type = 0; type < NUM_MONSTERS; ++type)
+                result.push_back(you.unique_creatures[type]);
+            return result;
+        }();
+        REQUIRE(unique_history == unique_history_after);
+    }
+
+    SECTION("editor removal immediately cleans attached derived children")
+    {
+        housing_ensure_level(false);
+        init_monsters();
+        init_spell_descs();
+
+        // Tentacle cleanup redraws each child. Isolate the synthetic fixture
+        // from unrelated vault-map metadata in the global Catch environment.
+        vector<pair<coord_def, unsigned int>> saved_map_ids;
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+            {
+                const coord_def pos = ambiguous_spawn + coord_def(dx, dy);
+                saved_map_ids.emplace_back(pos, env.level_map_ids(pos));
+                env.level_map_ids(pos) = INVALID_MAP_INDEX;
+            }
+        unwinder restore_map_ids = [&saved_map_ids]() {
+            for (const auto &entry : saved_map_ids)
+                env.level_map_ids(entry.first) = entry.second;
+        };
+
+        env.grid(ambiguous_spawn) = DNGN_DEEP_WATER;
+        mgen_data mg(MONS_KRAKEN, BEH_HOSTILE, ambiguous_spawn, MHITYOU,
+                     MG_FORBID_BANDS | MG_FORCE_PLACE
+                     | MG_IGNORE_UNIQUE_STATUS);
+        mg.extra_flags |= MF_NO_REWARD;
+        monster *kraken = create_monster(mg);
+        REQUIRE(kraken != nullptr);
+        unwinder remove_kraken = [&kraken]() {
+            if (kraken && kraken->alive())
+                monster_die(*kraken, KILL_RESET, NON_MONSTER, true, false,
+                            true);
+        };
+        kraken->props["housing_created_monster"] = true;
+        kraken->props[NEVER_CORPSE_KEY] = true;
+
+        mons_create_tentacles(kraken);
+        vector<monster*> children;
+        for (monster &mons : menv_real)
+            if (mons.alive() && mons.is_child_tentacle_of(kraken))
+                children.push_back(&mons);
+        REQUIRE_FALSE(children.empty());
+
+        REQUIRE(housing_remove_monster(ambiguous_spawn));
+        REQUIRE_FALSE(kraken->alive());
+        REQUIRE(monster_at(ambiguous_spawn) == nullptr);
+        for (monster *child : children)
+            REQUIRE_FALSE(child->alive());
+        REQUIRE(cloud_at(ambiguous_spawn) == nullptr);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_DEEP_WATER);
+        REQUIRE(housing_validate_current_map().valid());
     }
 
     SECTION("terrain clear removes a spawn but preserves the final one")
