@@ -313,10 +313,13 @@ bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic,
             args.needs_path = false;
             // TODO: a way to switch features while targeting?
             args.top_prompt = make_stringf(
-                "Building '<w>%s</w>'.\n"
-                "[<w>.</w>] place feature and continue, "
-                "[<w>ret</w>] place and exit, [<w>esc</w>] exit.",
-                dungeon_feature_name(feat));
+                "Building '<w>%s</w>'.\n%s",
+                dungeon_feature_name(feat),
+                housing_edit
+                    ? "[<w>Space/Enter/.</w>] place and continue, "
+                      "[<w>Esc</w>] finish."
+                    : "[<w>.</w>] place feature and continue, "
+                      "[<w>ret</w>] place and exit, [<w>esc</w>] exit.");
 
             if (in_bounds(target.target))
                 args.default_place = target.target; // last placed position
@@ -386,7 +389,7 @@ bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic,
         }
         if (done)
             return success;
-    } while (targeting_mode && target.isEndpoint);
+    } while (targeting_mode && (housing_edit || target.isEndpoint));
 
     return true;
 }

@@ -1124,7 +1124,9 @@ Housing map name) to create a passage within the current map.
 Two passages with the same name lead to one another. If more than two share a
 name, entering one chooses another unoccupied endpoint at random. A lone
 endpoint remains inert until another endpoint with the same name is placed.
-Clear housing terrain can remove any endpoint.
+Clear housing terrain can remove any endpoint. After entering the destination
+or passage name once, Space, Enter, and . place additional portals while
+keeping the targeting cursor open; press Esc when finished.
 %%%%
 Place a visitor inventory strip ability
 
@@ -1135,3 +1137,44 @@ affected, ground items remain, and Return home restores the visitor's canonical
 character and original inventory.
 
 Clear housing terrain can remove the tile.
+
+Space, Enter, and . place additional tiles while keeping the targeting cursor
+open; press Esc when finished.
+%%%%
+Show Housing coordinates ability
+
+Reports the current Housing map identifier, session role, and absolute map-grid
+position. The displayed x,y pair uses the same coordinate system as Housing
+publish validation errors, so you can move until it matches a reported invalid
+tile.
+%%%%
+Build housing terrain ability
+
+Places the terrain selected with Set housing terrain to build. Space, Enter,
+and . place terrain while keeping the targeting cursor open; press Esc when
+finished.
+%%%%
+Clear housing terrain to floor ability
+
+Clears Housing fixtures and terrain from the selected square and destroys all
+items on it. Space, Enter, and . clear squares while keeping the targeting
+cursor open; press Esc when finished.
+%%%%
+Create a housing monster ability
+
+Prompts for a monster type once, then places copies at selected squares. Space,
+Enter, and . place monsters while keeping the targeting cursor open; press Esc
+when finished. Monsters remain inert for their owner and act normally for
+visitors.
+%%%%
+Toggle an owner-only barrier ability
+
+Places or removes a see-through barrier that blocks the owner but opens for
+visitors. Space, Enter, and . toggle squares while keeping the targeting cursor
+open; press Esc when finished.
+%%%%
+Toggle a housing spawn point ability
+
+Places or removes Housing spawn points. Every map must retain at least one.
+Space, Enter, and . toggle squares while keeping the targeting cursor open;
+press Esc when finished.

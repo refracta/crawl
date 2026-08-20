@@ -326,7 +326,9 @@ struct ability_def
 
 static int _lookup_ability_slot(ability_type abil);
 static spret _do_ability(const ability_def& abil, bool fail, dist *target,
-                         bolt& beam, int piety_cost, int mp_cost, int hp_cost);
+                         bolt& beam, int piety_cost, int mp_cost, int hp_cost,
+                         const string *housing_portal_target = nullptr,
+                         bool defer_housing_checkpoint = false);
 static void _finalize_ability_costs(const ability_def& abil, int piety_cost,
                                     int mp_cost, int hp_cost);
 
@@ -788,6 +790,8 @@ static vector<ability_def> &_get_ability_list()
             "Place a visitor inventory strip",
             0, 0, 0, LOS_MAX_RANGE, {},
             abflag::instant | abflag::target | abflag::not_self },
+        { ABIL_HOUSING_SHOW_COORDINATES, "Show Housing coordinates",
+            0, 0, 0, -1, {}, abflag::instant },
 #ifdef WIZARD
         { ABIL_WIZ_BUILD_TERRAIN, "Build terrain",
             0, 0, 0, LOS_MAX_RANGE, {}, abflag::instant },
@@ -1865,7 +1869,8 @@ static bool _check_ability_possible(const ability_def& abil, bool quiet = false)
                 return false;
             }
         }
-        else if (abil.ability == ABIL_HOUSING_TRAVEL_TO_MAP)
+        else if (abil.ability == ABIL_HOUSING_TRAVEL_TO_MAP
+                 || abil.ability == ABIL_HOUSING_SHOW_COORDINATES)
         {
             if (!housing_is_owner() && !housing_is_visitor())
                 return false;
@@ -3006,7 +3011,36 @@ bool handle_post_ability_effects(ability_type ability,
     }
 }
 
-bool activate_talent(const talent& tal, dist *target)
+static bool _housing_repeating_editor_ability(ability_type ability)
+{
+    switch (ability)
+    {
+    case ABIL_HOUSING_BUILD_TERRAIN:
+    case ABIL_HOUSING_CLEAR_TERRAIN:
+    case ABIL_HOUSING_CREATE_PORTAL:
+    case ABIL_HOUSING_TOGGLE_VISITOR_WALL:
+    case ABIL_HOUSING_MANAGE_SPAWNS:
+    case ABIL_HOUSING_CREATE_VISITOR_STRIP:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Build/Clear already own a repeated feature targeter in wiz-dgn. The other
+// targeted Housing editors use this wrapper to return to the same cursor after
+// every application, regardless of whether Space, Enter, or '.' selected it.
+static bool _housing_repeats_via_ability(ability_type ability)
+{
+    return _housing_repeating_editor_ability(ability)
+           && ability != ABIL_HOUSING_BUILD_TERRAIN
+           && ability != ABIL_HOUSING_CLEAR_TERRAIN;
+}
+
+static bool _activate_talent_once(const talent& tal, dist *target,
+                                  const coord_def &repeat_default,
+                                  const string *housing_portal_target = nullptr,
+                                  bool defer_housing_checkpoint = false)
 {
     const ability_def& abil = get_ability_def(tal.which);
 
@@ -3047,6 +3081,12 @@ bool activate_talent(const talent& tal, dist *target)
         args.top_prompt = make_stringf("%s: <w>%s</w>",
                                        is_targeted ? "Aiming" : "Activating",
                                        ability_name(abil.ability).c_str());
+        if (_housing_repeating_editor_ability(abil.ability))
+        {
+            args.top_prompt +=
+                "\n[<w>Space/Enter/.</w>] apply and continue, "
+                "[<w>Esc</w>] finish.";
+        }
         targeter_beam* beamfunc = dynamic_cast<targeter_beam*>(hitfunc.get());
         if (beamfunc && beamfunc->beam.hit > 0 && !beamfunc->beam.is_explosion)
             args.get_desc_func = bind(desc_beam_hit_chance, placeholders::_1, hitfunc.get());
@@ -3070,7 +3110,9 @@ bool activate_talent(const talent& tal, dist *target)
                              failure_rate_to_string(tal.fail).c_str());
         }
         args.behaviour = &beh;
-        if (!is_targeted)
+        if (in_bounds(repeat_default))
+            args.default_place = repeat_default;
+        else if (!is_targeted)
             args.default_place = you.pos();
         if (hitfunc && hitfunc->can_affect_walls())
         {
@@ -3112,10 +3154,82 @@ bool activate_talent(const talent& tal, dist *target)
         pay_hp(hp_cost);
 
     const spret ability_result = _do_ability(abil, fail, target, beam,
-                                             piety_cost, mp_cost, hp_cost);
+                                             piety_cost, mp_cost, hp_cost,
+                                             housing_portal_target,
+                                             defer_housing_checkpoint);
     ASSERT(!(ability_result == spret::success && fail));
     return handle_post_ability_effects(tal.which, ability_result, piety_cost,
                                        mp_cost, hp_cost, tal.is_invocation);
+}
+
+bool activate_talent(const talent& tal, dist *target)
+{
+    // A supplied interactive dist is the quiver/action-cycler path. Keep the
+    // same object throughout the editor session so its fire_context and any
+    // targeter command result make it back to the action cycler. An explicit
+    // non-interactive target remains a one-shot API operation.
+    const bool repeat = _housing_repeats_via_ability(tal.which)
+                        && (!target || target->interactive);
+    if (!repeat)
+        return _activate_talent_once(tal, target, INVALID_COORD);
+
+    string portal_target;
+    if (tal.which == ABIL_HOUSING_CREATE_PORTAL)
+    {
+        while (true)
+        {
+            char destination[64] = "";
+            if (msgwin_get_line(
+                    "Portal target (account:map or local portal_name): ",
+                    destination, sizeof(destination))
+                || !destination[0])
+            {
+                canned_msg(MSG_OK);
+                return false;
+            }
+            portal_target = destination;
+            if (housing_valid_map_id(portal_target)
+                || housing_valid_map_target(portal_target))
+            {
+                break;
+            }
+            mpr("The Housing portal target is invalid.");
+        }
+    }
+
+    bool changed = false;
+    dist local_placement;
+    dist *placement = target ? target : &local_placement;
+    coord_def previous = in_bounds(placement->target)
+                         ? placement->target : INVALID_COORD;
+    while (!crawl_state.seen_hups)
+    {
+        // Supplying a remembered target normally requests non-interactive
+        // targeting. Keep this editor modal interactive while using that
+        // coordinate only as its next cursor position. Reset volatile output
+        // flags in case an iteration aborts before opening its targeter.
+        placement->isValid = false;
+        placement->isTarget = false;
+        placement->isEndpoint = false;
+        placement->isCancel = false;
+        placement->choseRay = false;
+        placement->delta.reset();
+        placement->cmd_result = CMD_NO_CMD;
+        placement->interactive = true;
+        const bool applied = _activate_talent_once(
+            tal, placement, previous,
+            portal_target.empty() ? nullptr : &portal_target, true);
+        changed = applied || changed;
+        if (placement->isCancel || crawl_state.seen_hups
+            || !placement->isValid)
+        {
+            break;
+        }
+        previous = placement->target;
+    }
+    if (changed)
+        housing_checkpoint();
+    return changed;
 }
 
 /// If the player is stationary, print 'You cannot move.' and return true.
@@ -3356,7 +3470,9 @@ spret run_ability_uncancel(uncancellable_type kind, int piety_cost,
  *  or was canceled (spret::abort). Never returns spret::none.
  */
 static spret _do_ability(const ability_def& abil, bool fail, dist *target,
-                         bolt& beam, int piety_cost, int mp_cost, int hp_cost)
+                         bolt& beam, int piety_cost, int mp_cost, int hp_cost,
+                         const string *housing_portal_target,
+                         bool defer_housing_checkpoint)
 {
     // Note: the costs will not be applied until after this switch
     // statement... it's assumed that only failures have returned! - bwr
@@ -4286,17 +4402,21 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
         if (!target)
             return spret::abort;
         char destination[64] = "";
-        if (msgwin_get_line(
-                "Portal target (account:map or local portal_name): ",
-                            destination, sizeof(destination))
-            || !destination[0])
+        if (housing_portal_target)
+            strlcpy(destination, housing_portal_target->c_str(),
+                    sizeof(destination));
+        else if (msgwin_get_line(
+                     "Portal target (account:map or local portal_name): ",
+                     destination, sizeof(destination))
+                 || !destination[0])
         {
             canned_msg(MSG_OK);
             return spret::abort;
         }
         if (!housing_create_portal(target->target, destination))
             return spret::abort;
-        housing_checkpoint();
+        if (!defer_housing_checkpoint)
+            housing_checkpoint();
         break;
     }
 
@@ -4340,19 +4460,28 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
     case ABIL_HOUSING_TOGGLE_VISITOR_WALL:
         if (!target || !housing_toggle_visitor_wall(target->target))
             return spret::abort;
-        housing_checkpoint();
+        if (!defer_housing_checkpoint)
+            housing_checkpoint();
         return spret::success;
 
     case ABIL_HOUSING_MANAGE_SPAWNS:
         if (!target || !housing_toggle_spawn_point(target->target))
             return spret::abort;
-        housing_checkpoint();
+        if (!defer_housing_checkpoint)
+            housing_checkpoint();
         return spret::success;
 
     case ABIL_HOUSING_CREATE_VISITOR_STRIP:
         if (!target || !housing_create_visitor_strip(target->target))
             return spret::abort;
-        housing_checkpoint();
+        if (!defer_housing_checkpoint)
+            housing_checkpoint();
+        return spret::success;
+
+    case ABIL_HOUSING_SHOW_COORDINATES:
+        mprf("Housing position: map=%s, role=%s, coordinate=(%d,%d).",
+             housing_current_map_id().c_str(), housing_role_name(),
+             you.pos().x, you.pos().y);
         return spret::success;
 
 #ifdef WIZARD
@@ -4597,7 +4726,8 @@ bool player_has_ability(ability_type abil, bool include_unusable)
     {
         if (abil == ABIL_HOUSING_RETURN_HOME)
             return housing_is_visitor();
-        if (abil == ABIL_HOUSING_TRAVEL_TO_MAP)
+        if (abil == ABIL_HOUSING_TRAVEL_TO_MAP
+            || abil == ABIL_HOUSING_SHOW_COORDINATES)
             return housing_is_owner() || housing_is_visitor();
 #ifndef WIZARD
         if (abil == ABIL_HOUSING_BUILD_TERRAIN
@@ -4772,6 +4902,7 @@ vector<talent> your_talents(bool include_unusable, bool ignore_piety)
             ABIL_HOUSING_TOGGLE_VISITOR_WALL,
             ABIL_HOUSING_MANAGE_SPAWNS,
             ABIL_HOUSING_CREATE_VISITOR_STRIP,
+            ABIL_HOUSING_SHOW_COORDINATES,
             ABIL_EVOKE_BLINK,
             ABIL_EVOKE_TURN_INVISIBLE,
             ABIL_EVOKE_DISPATER,
@@ -5031,6 +5162,10 @@ int find_ability_slot(const ability_type abil, char firstletter)
 
     case ABIL_HOUSING_CREATE_VISITOR_STRIP:
         first_slot = letter_to_index('I');
+        break;
+
+    case ABIL_HOUSING_SHOW_COORDINATES:
+        first_slot = letter_to_index('C');
         break;
 
 #ifdef WIZARD

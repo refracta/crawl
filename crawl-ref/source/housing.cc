@@ -1915,6 +1915,91 @@ static bool _remove_housing_spawn(const coord_def &pos,
     return true;
 }
 
+static void _discard_housing_shop_state_at(const coord_def &pos)
+{
+    if (env.shop.find(pos) == env.shop.end())
+        return;
+    // A malformed grid/table pair cannot safely pass through shop_at() or
+    // destroy_shop_at(), both of which assert structural consistency. The
+    // overview cleanup is independent of that consistency.
+    unnotice_feature(level_pos(level_id::current(), pos));
+    env.shop.erase(pos);
+}
+
+static bool _repair_or_remove_malformed_spawn(
+    const coord_def &pos, vector<coord_def> &spawns)
+{
+    if (actor_at(pos) && pos != you.pos())
+    {
+        mpr("That damaged Housing spawn point is occupied and cannot be "
+            "repaired safely.");
+        return false;
+    }
+
+    bool has_other_spawn = false;
+    for (const coord_def &other : spawns)
+        if (other != pos && _spawn_marker_at(other))
+        {
+            has_other_spawn = true;
+            break;
+        }
+
+    _discard_housing_shop_state_at(pos);
+    env.markers.remove_markers_at(pos);
+    _clear_housing_cell_to_floor(pos);
+    if (has_other_spawn)
+    {
+        spawns.erase(std::remove(spawns.begin(), spawns.end(), pos),
+                     spawns.end());
+        _store_spawns(spawns);
+        mpr("The damaged Housing spawn point is cleared.");
+        return true;
+    }
+
+    // Never leave a map without a spawn. If this was the last authenticated
+    // candidate, normalize the selected coordinate into one exact fixture
+    // instead of deleting it.
+    dungeon_terrain_changed(pos, DNGN_RUNELIGHT, false, false, true);
+    if (!_ensure_spawn_fixture(pos))
+        fail("Housing spawn repair was not atomic");
+    _store_spawns(vector<coord_def>{pos});
+    mpr("The final Housing spawn point is repaired.");
+    return true;
+}
+
+static bool _clear_malformed_housing_fixture(const coord_def &pos)
+{
+    if (actor_at(pos) && pos != you.pos())
+    {
+        mpr("That damaged Housing fixture is occupied and cannot be cleared "
+            "safely.");
+        return false;
+    }
+    _discard_housing_shop_state_at(pos);
+    env.markers.remove_markers_at(pos);
+    // The ordinary terrain mutator intentionally refuses an Orb dais and
+    // assumes its old feature enum is valid. This path exists specifically to
+    // recover publisher-rejected state, so do not trust or preserve any
+    // terrain metadata on the selected cell.
+    unnotice_feature(level_pos(level_id::current(), pos));
+    env.grid(pos) = DNGN_FLOOR;
+    env.pgrid(pos).flags = 0;
+    env.grid_colours(pos) = 0;
+    tile_env.flv(pos).feat = 0;
+    tile_env.flv(pos).feat_idx = 0;
+    tile_env.flv(pos).special = 0;
+    tile_init_flavour(pos);
+    set_terrain_changed(pos);
+    if (you.see_cell(pos))
+    {
+        update_terrain_knowledge(pos);
+        StashTrack.update_stash(pos);
+        redraw_view_at(pos);
+    }
+    mpr("The damaged Housing fixture is cleared.");
+    return true;
+}
+
 static bool _remove_housing_visitor_wall(const coord_def &pos)
 {
     if (!_visitor_wall_marker_at(pos) || actor_at(pos)
@@ -2050,24 +2135,72 @@ bool housing_clear_terrain(const coord_def &pos)
     if (!housing_authorize_action("clear terrain", 0) || !map_bounds(pos))
         return false;
 
-    housing_ensure_level();
-    const bool items_cleared = _clear_housing_items(pos);
+    // Entry normally authenticates the spawn set. Do not run that strict
+    // validator again when the owner has deliberately selected a damaged
+    // spawn for repair: it would throw before Clear could fix the coordinate
+    // named by the publication diagnostic.
     vector<coord_def> spawns = _stored_spawns();
+    const bool selected_stored_spawn =
+        std::find(spawns.begin(), spawns.end(), pos) != spawns.end();
+    const bool exact_spawn = _spawn_marker_at(pos);
+    const bool repairing_spawn =
+        (selected_stored_spawn && !exact_spawn)
+        || (env.grid(pos) == DNGN_RUNELIGHT && !selected_stored_spawn);
+    if (!repairing_spawn)
+    {
+        housing_ensure_level();
+        spawns = _stored_spawns();
+    }
+    const bool items_cleared = _clear_housing_items(pos);
     if (std::find(spawns.begin(), spawns.end(), pos) != spawns.end())
-        return _remove_housing_spawn(pos, spawns) || items_cleared;
+    {
+        if (_spawn_marker_at(pos))
+            return _remove_housing_spawn(pos, spawns) || items_cleared;
+        return _repair_or_remove_malformed_spawn(pos, spawns)
+               || items_cleared;
+    }
+    if (env.grid(pos) == DNGN_RUNELIGHT)
+        return _repair_or_remove_malformed_spawn(pos, spawns)
+               || items_cleared;
     if (_visitor_wall_marker_at(pos))
         return _remove_housing_visitor_wall(pos) || items_cleared;
-    if (_housing_local_portal_state_at(pos))
+    if (_local_portal_name_at(pos, nullptr))
         return _remove_housing_local_portal(pos) || items_cleared;
-    if (_housing_visitor_strip_state_at(pos))
+    if (_housing_local_portal_state_at(pos))
+        return _clear_malformed_housing_fixture(pos) || items_cleared;
+    if (_visitor_strip_marker_at(pos))
         return _remove_housing_visitor_strip(pos) || items_cleared;
-    if (_housing_portal_state_at(pos))
+    if (_housing_visitor_strip_state_at(pos))
+        return _clear_malformed_housing_fixture(pos) || items_cleared;
+    if (_portal_target_at(pos, nullptr))
         return _remove_housing_portal(pos) || items_cleared;
+    if (_housing_portal_state_at(pos))
+        return _clear_malformed_housing_fixture(pos) || items_cleared;
     if (env.grid(pos) == DNGN_ENTER_SHOP
         || env.grid(pos) == DNGN_ABANDONED_SHOP
         || env.shop.find(pos) != env.shop.end())
     {
+        const bool exact_active = env.grid(pos) == DNGN_ENTER_SHOP
+            && _housing_shop_can_be_published(pos)
+            && env.markers.get_markers_at(pos).empty();
+        const bool exact_abandoned =
+            env.grid(pos) == DNGN_ABANDONED_SHOP
+            && env.shop.find(pos) == env.shop.end()
+            && env.markers.get_markers_at(pos).empty();
+        if (!exact_active && !exact_abandoned)
+            return _clear_malformed_housing_fixture(pos) || items_cleared;
         return _remove_housing_shop(pos) || items_cleared;
+    }
+    // Exact fixtures have already returned above. Anything left with a
+    // marker, a reserved runelight, or terrain outside the publication
+    // allowlist is damaged state selected explicitly by the owner for
+    // destructive repair.
+    if (!env.markers.get_markers_at(pos).empty()
+        || env.grid(pos) == DNGN_RUNELIGHT
+        || !is_valid_feature_type(env.grid(pos))
+        || !housing_feature_allowed(env.grid(pos)))
+    {
+        return _clear_malformed_housing_fixture(pos) || items_cleared;
     }
     if (!housing_can_edit(pos))
     {
@@ -2087,8 +2220,26 @@ bool housing_toggle_spawn_point(const coord_def &pos)
         return false;
     }
 
-    housing_ensure_level();
     vector<coord_def> spawns = _stored_spawns();
+    const bool recovery_add = spawns.empty()
+        && env.grid(pos) == DNGN_FLOOR && !actor_at(pos)
+        && env.igrid(pos) == NON_ITEM
+        && env.markers.get_markers_at(pos).empty();
+    if (!recovery_add)
+    {
+        housing_ensure_level();
+        spawns = _stored_spawns();
+    }
+    else
+    {
+        // A damaged empty/wrong-type spawn property is exactly the state for
+        // which publication asks the owner to create a spawn. Preserve any
+        // already-authenticated visible fixtures, then let this placement
+        // rewrite the canonical list instead of throwing in strict migration.
+        for (rectangle_iterator existing(0); existing; ++existing)
+            if (map_bounds(*existing) && _spawn_marker_at(*existing))
+                spawns.push_back(*existing);
+    }
     const auto found = std::find(spawns.begin(), spawns.end(), pos);
     if (found != spawns.end())
         return _remove_housing_spawn(pos, spawns);
@@ -2568,9 +2719,10 @@ bool housing_create_monster()
         mpr("That monster cannot be created in Housing.");
         return false;
     }
-    // Match the wizard flow: settle the requested type first, then enter a
-    // WebTiles-compatible cell targeter. Quivered activation reaches this same
-    // chooser instead of borrowing hostile autofight targeting.
+    // Match the wizard flow: settle the requested type once, then keep a
+    // WebTiles-compatible cell targeter open until the editor explicitly
+    // cancels it. Quivered activation reaches this same chooser instead of
+    // borrowing hostile autofight targeting.
     targeter_smite hitfunc(&you, LOS_MAX_RANGE, 0, 0,
                            true, false, false);
     direction_chooser_args args;
@@ -2581,59 +2733,86 @@ bool housing_create_monster()
     args.needs_path = false;
     args.self = confirm_prompt_type::cancel;
     args.top_prompt = "Place housing monster: <w>" +
-                      mons_type_name(type, DESC_PLAIN) + "</w>";
-    dist target;
-    direction(target, args);
-    if (!target.isValid || target.isCancel)
-    {
-        canned_msg(MSG_OK);
-        return false;
-    }
-    const coord_def place = target.target;
+                      mons_type_name(type, DESC_PLAIN) + "</w>\n"
+                      "[<w>Space/Enter/.</w>] place and continue, "
+                      "[<w>Esc</w>] finish.";
 
-    // The chooser is advisory. Recheck every mutation invariant here so
-    // scripted/replayed targets cannot overwrite actors, items, authenticated
-    // fixtures, spawns, unseen cells, or map bounds.
-    if (!map_bounds(place) || !in_bounds(place)
-        || (place - you.pos()).rdist() > LOS_MAX_RANGE
-        || !you.see_cell_no_trans(place)
-        || actor_at(place) || env.igrid(place) != NON_ITEM
-        || !env.markers.get_markers_at(place).empty()
-        || housing_is_spawn(place))
+    bool created_any = false;
+    coord_def previous = INVALID_COORD;
+    while (!crawl_state.seen_hups)
     {
-        mpr("That square cannot hold a Housing monster.");
-        return false;
-    }
+        if (in_bounds(previous))
+            args.default_place = previous;
+        dist target;
+        target.interactive = true;
+        direction(target, args);
+        if (!target.isValid || target.isCancel || crawl_state.seen_hups)
+        {
+            if (!created_any)
+                canned_msg(MSG_OK);
+            return created_any;
+        }
+        previous = target.target;
+        const coord_def place = target.target;
 
-    if (!monster_habitable_grid(type, place))
-    {
-        mpr("That monster cannot inhabit the targeted square.");
-        return false;
-    }
+        // Recompute the live limit for every placement: an earlier placement
+        // in this same editor session may have reached it.
+        const int current_live = std::count_if(
+            menv_real.begin(), menv_real.end(),
+            [](const monster &mons) { return mons.alive(); });
+        if (current_live >= HOUSING_MAX_MONSTERS)
+        {
+            mpr("This Housing map already has the maximum number of "
+                "monsters. Press Esc to finish.");
+            continue;
+        }
 
-    mgen_data mg(type, BEH_HOSTILE, place, MHITYOU,
-                 MG_FORBID_BANDS | MG_FORCE_PLACE
-                 | MG_IGNORE_UNIQUE_STATUS);
-    mg.extra_flags |= MF_NO_REWARD;
-    monster *created = create_monster(mg);
-    if (!created)
-    {
-        mpr("The monster could not be created.");
-        return false;
+        // The chooser is advisory. Recheck every mutation invariant here so
+        // scripted/replayed targets cannot overwrite actors, items,
+        // authenticated fixtures, spawns, unseen cells, or map bounds.
+        if (!map_bounds(place) || !in_bounds(place)
+            || (place - you.pos()).rdist() > LOS_MAX_RANGE
+            || !you.see_cell_no_trans(place)
+            || actor_at(place) || env.igrid(place) != NON_ITEM
+            || !env.markers.get_markers_at(place).empty()
+            || housing_is_spawn(place))
+        {
+            mpr("That square cannot hold a Housing monster.");
+            continue;
+        }
+
+        if (!monster_habitable_grid(type, place))
+        {
+            mpr("That monster cannot inhabit the targeted square.");
+            continue;
+        }
+
+        mgen_data mg(type, BEH_HOSTILE, place, MHITYOU,
+                     MG_FORBID_BANDS | MG_FORCE_PLACE
+                     | MG_IGNORE_UNIQUE_STATUS);
+        mg.extra_flags |= MF_NO_REWARD;
+        monster *created = create_monster(mg);
+        if (!created)
+        {
+            mpr("The monster could not be created.");
+            continue;
+        }
+        created->props[HOUSING_MONSTER_KEY] = true;
+        created->props[NEVER_CORPSE_KEY] = true;
+        // Treat only equipment generated as part of this editor action as
+        // disposable. A monster that later acquires a real player item will
+        // still drop it normally. Preserve unrands: marking one disposable
+        // while its global unique status says it exists would make its
+        // lifecycle ambiguous.
+        for (mon_inv_iterator item(*created); item; ++item)
+        {
+            if (!is_unrandom_artefact(*item))
+                item->flags |= ISFLAG_SUMMONED;
+        }
+        mprf("%s appears.", created->name(DESC_A).c_str());
+        created_any = true;
     }
-    created->props[HOUSING_MONSTER_KEY] = true;
-    created->props[NEVER_CORPSE_KEY] = true;
-    // Treat only equipment generated as part of this editor action as
-    // disposable. A monster that later acquires a real player item will still
-    // drop it normally. Preserve unrands: marking one disposable while its
-    // global unique status says it exists would make its lifecycle ambiguous.
-    for (mon_inv_iterator item(*created); item; ++item)
-    {
-        if (!is_unrandom_artefact(*item))
-            item->flags |= ISFLAG_SUMMONED;
-    }
-    mprf("%s appears.", created->name(DESC_A).c_str());
-    return true;
+    return created_any;
 }
 
 bool housing_can_create_shop()
@@ -4215,15 +4394,34 @@ static bool _housing_shop_can_be_published(const coord_def &pos)
                        [](const item_def &item) { return item.is_valid(); });
 }
 
-static bool _current_map_can_be_published()
+static housing_publish_validation _housing_publish_problem(
+    housing_publish_problem_type problem, const string &message,
+    int count = 0, int limit = 0, const string &detail = "")
+{
+    housing_publish_validation result;
+    result.problem = problem;
+    result.count = count;
+    result.limit = limit;
+    result.detail = detail;
+    result.message = message;
+    return result;
+}
+
+static housing_publish_validation _housing_publish_problem_at(
+    housing_publish_problem_type problem, const coord_def &pos,
+    const string &message, const string &detail = "", int count = 0,
+    int limit = 0)
+{
+    housing_publish_validation result =
+        _housing_publish_problem(problem, message, count, limit, detail);
+    result.has_position = true;
+    result.position = pos;
+    return result;
+}
+
+housing_publish_validation housing_validate_current_map()
 {
     const vector<coord_def> spawns = _stored_spawns();
-    if (spawns.empty())
-    {
-        mprf(MSGCH_ERROR, "Housing publish rejected: no valid spawn.");
-        return false;
-    }
-
     for (rectangle_iterator pos(0); pos; ++pos)
     {
         if (!map_bounds(*pos))
@@ -4235,22 +4433,31 @@ static bool _current_map_can_be_published()
             continue;
         if (feat == DNGN_RUNELIGHT)
         {
-            if (!housing_is_spawn(*pos) || !_spawn_marker_at(*pos))
+            if (std::find(spawns.begin(), spawns.end(), *pos)
+                    == spawns.end()
+                || !_spawn_marker_at(*pos))
             {
-                mprf(MSGCH_ERROR,
-                     "Housing publish rejected: invalid spawn at (%d,%d).",
-                     pos->x, pos->y);
-                return false;
+                return _housing_publish_problem_at(
+                    housing_publish_problem_type::invalid_spawn, *pos,
+                    make_stringf(
+                        "Housing publish rejected: the spawn point at "
+                        "(%d,%d) has missing or damaged Housing metadata. "
+                        "Clear and recreate that spawn point.",
+                        pos->x, pos->y),
+                    "spawn point");
             }
         }
         else if (feat == DNGN_ENTER_SHOP)
         {
             if (!_housing_shop_can_be_published(*pos))
             {
-                mprf(MSGCH_ERROR,
-                     "Housing publish rejected: invalid shop at (%d,%d).",
-                     pos->x, pos->y);
-                return false;
+                return _housing_publish_problem_at(
+                    housing_publish_problem_type::invalid_shop, *pos,
+                    make_stringf(
+                        "Housing publish rejected: the shop at (%d,%d) "
+                        "has missing or invalid shop data. Clear and "
+                        "recreate that shop.", pos->x, pos->y),
+                    "shop");
             }
         }
         else if (feat == DNGN_ABANDONED_SHOP)
@@ -4261,20 +4468,28 @@ static bool _current_map_can_be_published()
         {
             if (!_portal_target_at(*pos, nullptr))
             {
-                mprf(MSGCH_ERROR,
-                     "Housing publish rejected: invalid portal at (%d,%d).",
-                     pos->x, pos->y);
-                return false;
+                return _housing_publish_problem_at(
+                    housing_publish_problem_type::invalid_portal, *pos,
+                    make_stringf(
+                        "Housing publish rejected: the map portal at "
+                        "(%d,%d) has missing or invalid destination data. "
+                        "Clear and recreate that portal.", pos->x, pos->y),
+                    "map portal");
             }
         }
         else if (feat == DNGN_TRANSPORTER_LANDING)
         {
             if (!_visitor_strip_marker_at(*pos))
             {
-                mprf(MSGCH_ERROR,
-                     "Housing publish rejected: invalid visitor inventory "
-                     "tile at (%d,%d).", pos->x, pos->y);
-                return false;
+                return _housing_publish_problem_at(
+                    housing_publish_problem_type::invalid_visitor_strip,
+                    *pos,
+                    make_stringf(
+                        "Housing publish rejected: the visitor inventory "
+                        "tile at (%d,%d) has missing or damaged Housing "
+                        "metadata. Clear and recreate that tile.",
+                        pos->x, pos->y),
+                    "visitor inventory tile");
             }
         }
         else if (feat == DNGN_STONE_ARCH
@@ -4283,47 +4498,113 @@ static bool _current_map_can_be_published()
         {
             if (!_local_portal_name_at(*pos, nullptr))
             {
-                mprf(MSGCH_ERROR,
-                     "Housing publish rejected: unauthenticated named "
-                     "passage tile at (%d,%d).", pos->x, pos->y);
-                return false;
+                return _housing_publish_problem_at(
+                    housing_publish_problem_type::invalid_local_portal,
+                    *pos,
+                    make_stringf(
+                        "Housing publish rejected: the named passage at "
+                        "(%d,%d) has missing or damaged Housing metadata. "
+                        "Clear and recreate that passage.",
+                        pos->x, pos->y),
+                    "named passage");
             }
         }
-        else if (!housing_feature_allowed(feat))
+        else if (!is_valid_feature_type(feat)
+                 || !housing_feature_allowed(feat))
         {
-            mprf(MSGCH_ERROR,
-                 "Housing publish rejected: feature %d at (%d,%d).",
-                 static_cast<int>(feat), pos->x, pos->y);
-            return false;
+            const string feature = is_valid_feature_type(feat)
+                                   ? dungeon_feature_name(feat) : "unknown";
+            return _housing_publish_problem_at(
+                housing_publish_problem_type::unsupported_feature, *pos,
+                make_stringf(
+                    "Housing publish rejected: unsupported terrain '%s' "
+                    "(feature %d) at (%d,%d). Clear or replace that tile.",
+                    feature.c_str(), static_cast<int>(feat),
+                    pos->x, pos->y), feature);
         }
     }
+
+    // A legacy floor coordinate remains syntactically readable by
+    // _stored_spawns(), but publication requires every stored entry to be the
+    // same visible authenticated runelight fixture that visitors will use.
+    for (const coord_def &spawn : spawns)
+        if (!_spawn_marker_at(spawn))
+        {
+            return _housing_publish_problem_at(
+                housing_publish_problem_type::invalid_spawn, spawn,
+                make_stringf(
+                    "Housing publish rejected: the spawn point at "
+                    "(%d,%d) has missing or damaged Housing metadata. "
+                    "Clear and recreate that spawn point.",
+                    spawn.x, spawn.y), "spawn point");
+        }
+
+    if (spawns.empty())
+    {
+        return _housing_publish_problem(
+            housing_publish_problem_type::no_valid_spawn,
+            "Housing publish rejected: no valid spawn point was found "
+            "(found 0; need at least 1). Create a spawn point before "
+            "publishing.", 0, 1, "spawn point");
+    }
+
     int housing_monsters = 0;
     for (const monster &mons : menv_real)
         if (mons.alive())
         {
-            if (++housing_monsters > HOUSING_MAX_MONSTERS
-                || !_housing_monster_can_be_published(mons))
+            ++housing_monsters;
+            if (!_housing_monster_can_be_published(mons))
             {
-                mprf(MSGCH_ERROR,
-                     "Housing publish rejected: unsafe monster %d.",
-                     static_cast<int>(mons.type));
-                return false;
+                const bool valid_type = mons.type > MONS_PROGRAM_BUG
+                                        && mons.type < NUM_MONSTERS;
+                const string name = valid_type ? mons.name(DESC_PLAIN)
+                                               : "unknown monster";
+                const coord_def pos = mons.pos();
+                return _housing_publish_problem_at(
+                    housing_publish_problem_type::unsafe_monster, pos,
+                    make_stringf(
+                        "Housing publish rejected: unsafe monster '%s' "
+                        "(type %d) at (%d,%d). Remove it and summon it "
+                        "again before publishing.", name.c_str(),
+                        static_cast<int>(mons.type), pos.x, pos.y), name);
             }
         }
-
-    if (env.shop.size() > HOUSING_MAX_SHOPS)
+    if (housing_monsters > HOUSING_MAX_MONSTERS)
     {
-        mprf(MSGCH_ERROR, "Housing publish rejected: too many shops.");
-        return false;
+        return _housing_publish_problem(
+            housing_publish_problem_type::too_many_monsters,
+            make_stringf(
+                "Housing publish rejected: too many monsters "
+                "(%d present; limit %d). Remove at least %d.",
+                housing_monsters, HOUSING_MAX_MONSTERS,
+                housing_monsters - HOUSING_MAX_MONSTERS),
+            housing_monsters, HOUSING_MAX_MONSTERS, "monsters");
     }
+
     for (const auto &entry : env.shop)
-        if (env.grid(entry.first) != DNGN_ENTER_SHOP
+        if (!map_bounds(entry.first)
+            || env.grid(entry.first) != DNGN_ENTER_SHOP
             || !_housing_shop_can_be_published(entry.first))
         {
-            mprf(MSGCH_ERROR,
-                 "Housing publish rejected: inconsistent shop state.");
-            return false;
+            const coord_def pos = entry.first;
+            return _housing_publish_problem_at(
+                housing_publish_problem_type::inconsistent_shop, pos,
+                make_stringf(
+                    "Housing publish rejected: shop data at (%d,%d) does "
+                    "not match a valid shop tile. Clear and recreate that "
+                    "shop.", pos.x, pos.y), "shop");
         }
+    if (env.shop.size() > HOUSING_MAX_SHOPS)
+    {
+        const int shops = static_cast<int>(env.shop.size());
+        return _housing_publish_problem(
+            housing_publish_problem_type::too_many_shops,
+            make_stringf(
+                "Housing publish rejected: too many shops "
+                "(%d present; limit %d). Remove at least %d.",
+                shops, HOUSING_MAX_SHOPS, shops - HOUSING_MAX_SHOPS),
+            shops, HOUSING_MAX_SHOPS, "shops");
+    }
 
     int local_portals = 0;
     for (map_marker *marker : env.markers.get_all())
@@ -4339,28 +4620,45 @@ static bool _current_map_can_be_published()
                  && !local_portal
                  && !_visitor_strip_marker_at(marker->pos))))
         {
-            mprf(MSGCH_ERROR,
-                 "Housing publish rejected: marker %d at (%d,%d).",
-                 static_cast<int>(marker->get_type()),
-                 marker->pos.x, marker->pos.y);
-            return false;
+            const coord_def pos = marker->pos;
+            const string detail = make_stringf(
+                "marker type %d", static_cast<int>(marker->get_type()));
+            return _housing_publish_problem_at(
+                housing_publish_problem_type::invalid_marker, pos,
+                make_stringf(
+                    "Housing publish rejected: unrecognized or damaged "
+                    "%s at (%d,%d). Clear and recreate the fixture on "
+                    "that tile.", detail.c_str(), pos.x, pos.y), detail);
         }
     }
     if (local_portals > HOUSING_MAX_LOCAL_PORTALS)
     {
-        mprf(MSGCH_ERROR,
-             "Housing publish rejected: too many named passage endpoints.");
-        return false;
+        return _housing_publish_problem(
+            housing_publish_problem_type::too_many_local_portals,
+            make_stringf(
+                "Housing publish rejected: too many named passage "
+                "endpoints (%d present; limit %d). Remove at least %d.",
+                local_portals, HOUSING_MAX_LOCAL_PORTALS,
+                local_portals - HOUSING_MAX_LOCAL_PORTALS),
+            local_portals, HOUSING_MAX_LOCAL_PORTALS,
+            "named passage endpoints");
     }
 
     // Public snapshots are data, not executable map definitions. Only the
     // strictly validated authenticated Housing fixtures above are accepted.
     if (!env.cloud.empty())
     {
-        mprf(MSGCH_ERROR, "Housing publish rejected: cloud state.");
-        return false;
+        const int clouds = static_cast<int>(env.cloud.size());
+        const coord_def first = env.cloud.begin()->first;
+        return _housing_publish_problem_at(
+            housing_publish_problem_type::cloud_state, first,
+            make_stringf(
+                "Housing publish rejected: %d cloud%s remain; the first "
+                "is at (%d,%d). Wait for all clouds to disappear before "
+                "publishing.", clouds, clouds == 1 ? "" : "s",
+                first.x, first.y), "cloud", clouds);
     }
-    return true;
+    return housing_publish_validation();
 }
 
 void housing_sync_current_map()
@@ -4445,9 +4743,11 @@ bool housing_publish_current_map()
              "The Housing account/map publication binding is invalid.");
         return false;
     }
-    if (!_current_map_can_be_published())
+    const housing_publish_validation validation =
+        housing_validate_current_map();
+    if (!validation.valid())
     {
-        mprf(MSGCH_ERROR, "This Housing map is not safe to publish.");
+        mprf(MSGCH_ERROR, "%s", validation.message.c_str());
         return false;
     }
     const string save_level_chunk = _housing_save_level_chunk();

@@ -224,6 +224,49 @@ void housing_prepare_map_transition_restore(bool known_map_change = false);
 // just-restored public level. Called immediately after TAG_LEVEL restore and
 // before marker activation or other actor creation.
 void housing_prepare_loaded_level();
+
+// A stable, read-only description of the first condition that prevents the
+// current level from being published. Location-bearing problems retain their
+// exact grid coordinate so editor UI and tests do not need to parse messages.
+enum class housing_publish_problem_type
+{
+    none,
+    no_valid_spawn,
+    invalid_spawn,
+    invalid_shop,
+    invalid_portal,
+    invalid_visitor_strip,
+    invalid_local_portal,
+    unsupported_feature,
+    unsafe_monster,
+    too_many_monsters,
+    too_many_shops,
+    inconsistent_shop,
+    invalid_marker,
+    too_many_local_portals,
+    cloud_state,
+};
+
+struct housing_publish_validation
+{
+    housing_publish_problem_type problem =
+        housing_publish_problem_type::none;
+    bool has_position = false;
+    coord_def position = coord_def(-1, -1);
+    int count = 0;
+    int limit = 0;
+    // Human-readable object name (terrain, monster, etc.) when applicable.
+    string detail;
+    // Complete user-facing rejection message, including remediation hints.
+    string message;
+
+    bool valid() const
+    {
+        return problem == housing_publish_problem_type::none;
+    }
+};
+
+housing_publish_validation housing_validate_current_map();
 // Atomically publish the active owner TAG_LEVEL. A console session with
 // neither account binding nor public directory is a successful no-op. A
 // bound account without a public directory, or any validation/I/O failure,

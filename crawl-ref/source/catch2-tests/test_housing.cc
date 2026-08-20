@@ -550,7 +550,8 @@ TEST_CASE("Housing ability ids remain append-only", "[single-file]")
     REQUIRE(static_cast<int>(ABIL_HOUSING_TOGGLE_VISITOR_WALL) == 9010);
     REQUIRE(static_cast<int>(ABIL_HOUSING_MANAGE_SPAWNS) == 9011);
     REQUIRE(static_cast<int>(ABIL_HOUSING_CREATE_VISITOR_STRIP) == 9012);
-    REQUIRE(ABIL_LAST_HOUSING == ABIL_HOUSING_CREATE_VISITOR_STRIP);
+    REQUIRE(static_cast<int>(ABIL_HOUSING_SHOW_COORDINATES) == 9013);
+    REQUIRE(ABIL_LAST_HOUSING == ABIL_HOUSING_SHOW_COORDINATES);
 }
 
 TEST_CASE("Housing snapshot schema is explicit and backwards compatible",
@@ -755,6 +756,14 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
     };
     unwind_var<coord_def> saved_position(you.position, old_start);
     unwind_var<CrawlHashTable> saved_properties(env.properties);
+    const auto saved_shops = env.shop;
+    const auto saved_clouds = env.cloud;
+    unwinder restore_publication_state = [saved_shops, saved_clouds]() {
+        env.shop = saved_shops;
+        env.cloud = saved_clouds;
+    };
+    env.shop.clear();
+    env.cloud.clear();
 
     const dungeon_feature_type old_start_feat = env.grid(old_start);
     const dungeon_feature_type old_spawn_feat = env.grid(template_spawn);
@@ -962,6 +971,177 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE_FALSE(housing_is_spawn(ambiguous_spawn));
     }
 
+    SECTION("publication reports the exact damaged spawn coordinate")
+    {
+        housing_ensure_level(false);
+        vector<map_marker*> markers =
+            env.markers.get_markers_at(template_spawn);
+        REQUIRE(markers.size() == 1);
+        auto *wiz = static_cast<map_wiz_props_marker *>(markers.front());
+        wiz->properties.erase("veto_destroy");
+
+        const housing_publish_validation result =
+            housing_validate_current_map();
+        REQUIRE_FALSE(result.valid());
+        REQUIRE(result.problem
+                == housing_publish_problem_type::invalid_spawn);
+        REQUIRE(result.has_position);
+        REQUIRE(result.position == template_spawn);
+        REQUIRE(result.detail == "spawn point");
+        REQUIRE(result.message.find("(21,20)") != string::npos);
+        REQUIRE(result.message.find("Clear and recreate") != string::npos);
+
+        // Clear must be able to act on the coordinate it reports. Since this
+        // is the final spawn, it repairs the exact fixture instead of leaving
+        // the map spawn-less.
+        REQUIRE(housing_clear_terrain(template_spawn));
+        REQUIRE(housing_is_spawn(template_spawn));
+        REQUIRE(env.grid(template_spawn) == DNGN_RUNELIGHT);
+        REQUIRE(housing_validate_current_map().valid());
+    }
+
+    SECTION("publication handles an unknown terrain enum without crashing")
+    {
+        housing_ensure_level(false);
+        env.grid(ambiguous_spawn) =
+            static_cast<dungeon_feature_type>(NUM_FEATURES);
+
+        const housing_publish_validation result =
+            housing_validate_current_map();
+        REQUIRE_FALSE(result.valid());
+        REQUIRE(result.problem
+                == housing_publish_problem_type::unsupported_feature);
+        REQUIRE(result.has_position);
+        REQUIRE(result.position == ambiguous_spawn);
+        REQUIRE(result.detail == "unknown");
+        REQUIRE(result.message.find("feature ") != string::npos);
+        REQUIRE(result.message.find("(22,20)") != string::npos);
+
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(housing_validate_current_map().valid());
+    }
+
+    SECTION("clear repairs an authenticated runelight missing from spawn data")
+    {
+        housing_ensure_level(false);
+        REQUIRE(env.grid(template_spawn) == DNGN_RUNELIGHT);
+        REQUIRE(env.markers.get_markers_at(template_spawn).size() == 1);
+        env.properties.erase("housing_spawn_points");
+
+        const housing_publish_validation before =
+            housing_validate_current_map();
+        REQUIRE_FALSE(before.valid());
+        REQUIRE(before.problem
+                == housing_publish_problem_type::invalid_spawn);
+        REQUIRE(before.position == template_spawn);
+
+        REQUIRE(housing_clear_terrain(template_spawn));
+        REQUIRE(housing_is_spawn(template_spawn));
+        REQUIRE(housing_validate_current_map().valid());
+    }
+
+    SECTION("publication rejects and Clear repairs a stored floor spawn")
+    {
+        housing_ensure_level(false);
+        env.grid(template_spawn) = DNGN_FLOOR;
+
+        const housing_publish_validation before =
+            housing_validate_current_map();
+        REQUIRE_FALSE(before.valid());
+        REQUIRE(before.problem
+                == housing_publish_problem_type::invalid_spawn);
+        REQUIRE(before.position == template_spawn);
+
+        REQUIRE(housing_clear_terrain(template_spawn));
+        REQUIRE(env.grid(template_spawn) == DNGN_RUNELIGHT);
+        REQUIRE(housing_is_spawn(template_spawn));
+        REQUIRE(housing_validate_current_map().valid());
+    }
+
+    SECTION("spawn placement repairs an invalid empty spawn property")
+    {
+        housing_ensure_level(false);
+        env.properties.erase("housing_spawn_points");
+        env.properties["housing_spawn_points"] = 17;
+
+        REQUIRE(housing_toggle_spawn_point(ambiguous_spawn));
+        REQUIRE(housing_is_spawn(template_spawn));
+        REQUIRE(housing_is_spawn(ambiguous_spawn));
+        REQUIRE(housing_validate_current_map().valid());
+    }
+
+    SECTION("publication reports an inconsistent shop entry coordinate")
+    {
+        housing_ensure_level(false);
+        shop_struct orphan;
+        orphan.pos = ambiguous_spawn;
+        orphan.type = SHOP_GENERAL;
+        orphan.level = 1;
+        env.shop[ambiguous_spawn] = orphan;
+
+        const housing_publish_validation result =
+            housing_validate_current_map();
+        REQUIRE_FALSE(result.valid());
+        REQUIRE(result.problem
+                == housing_publish_problem_type::inconsistent_shop);
+        REQUIRE(result.has_position);
+        REQUIRE(result.position == ambiguous_spawn);
+        REQUIRE(result.message.find("(22,20)") != string::npos);
+    }
+
+    SECTION("publication reports the first cloud coordinate and count")
+    {
+        housing_ensure_level(false);
+        cloud_struct first;
+        first.pos = old_start;
+        first.type = CLOUD_FIRE;
+        cloud_struct second;
+        second.pos = ambiguous_spawn;
+        second.type = CLOUD_STEAM;
+        env.cloud[old_start] = first;
+        env.cloud[ambiguous_spawn] = second;
+
+        const housing_publish_validation result =
+            housing_validate_current_map();
+        REQUIRE_FALSE(result.valid());
+        REQUIRE(result.problem
+                == housing_publish_problem_type::cloud_state);
+        REQUIRE(result.has_position);
+        REQUIRE(result.position == old_start);
+        REQUIRE(result.count == 2);
+        REQUIRE(result.message.find("2 clouds") != string::npos);
+        REQUIRE(result.message.find("(20,20)") != string::npos);
+    }
+
+    SECTION("publication identifies an unsafe monster by name and position")
+    {
+        housing_ensure_level(false);
+        init_monsters();
+        mgen_data mg(MONS_RAT, BEH_HOSTILE, ambiguous_spawn, MHITYOU,
+                     MG_FORBID_BANDS | MG_FORCE_PLACE);
+        monster *created = create_monster(mg);
+        REQUIRE(created != nullptr);
+        unwinder remove_created = [&created]() {
+            if (created && created->alive())
+            {
+                env.mgrid(created->pos()) = NON_MONSTER;
+                created->reset();
+            }
+        };
+
+        const housing_publish_validation result =
+            housing_validate_current_map();
+        REQUIRE_FALSE(result.valid());
+        REQUIRE(result.problem
+                == housing_publish_problem_type::unsafe_monster);
+        REQUIRE(result.has_position);
+        REQUIRE(result.position == ambiguous_spawn);
+        REQUIRE(result.detail.find("rat") != string::npos);
+        REQUIRE(result.message.find("(22,20)") != string::npos);
+        REQUIRE(result.message.find("type") != string::npos);
+    }
+
     SECTION("terrain clear removes a spawn but preserves the final one")
     {
         housing_ensure_level(false);
@@ -1112,7 +1292,7 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE_FALSE(housing_visitor_strip_is_valid(ambiguous_spawn));
     }
 
-    SECTION("conflicting new fixture roles fail closed")
+    SECTION("Clear removes a fixture with conflicting roles")
     {
         housing_ensure_level(false);
         REQUIRE(housing_create_portal(ambiguous_spawn, "gallery"));
@@ -1122,9 +1302,9 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         auto *wiz = static_cast<map_wiz_props_marker *>(markers.front());
         wiz->set_property("housing_visitor_strip", "yes");
         REQUIRE_FALSE(housing_local_portal_is_valid(ambiguous_spawn));
-        REQUIRE_FALSE(housing_clear_terrain(ambiguous_spawn));
-        REQUIRE(env.grid(ambiguous_spawn) == DNGN_STONE_ARCH);
-        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).size() == 1);
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
     }
 
     SECTION("malformed passage markers never fall through to native traps")
@@ -1163,7 +1343,7 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE(env.markers.get_markers_at(ambiguous_spawn).size() == 1);
     }
 
-    SECTION("terrain clear preserves a malformed portal fail closed")
+    SECTION("terrain clear removes a malformed portal and its items")
     {
         housing_ensure_level(false);
         env.grid(ambiguous_spawn) = DNGN_ENTER_PORTAL_VAULT;
@@ -1175,14 +1355,11 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         const int gold_index = copy_item_to_grid(gold, ambiguous_spawn);
         REQUIRE(gold_index != NON_ITEM);
 
-        // Item clearing is an independent, explicitly destructive operation;
-        // malformed reserved terrain remains fail-closed after its stack is
-        // removed and the successful item mutation is checkpointed.
+        // The selected cell is explicitly destructive: its item stack and
+        // publisher-rejected reserved terrain are repaired together.
         REQUIRE(housing_clear_terrain(ambiguous_spawn));
         REQUIRE_FALSE(env.item[gold_index].defined());
-        REQUIRE(env.grid(ambiguous_spawn) == DNGN_ENTER_PORTAL_VAULT);
-        REQUIRE_FALSE(housing_clear_terrain(ambiguous_spawn));
-        REQUIRE(env.grid(ambiguous_spawn) == DNGN_ENTER_PORTAL_VAULT);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
         REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
     }
 
@@ -1205,13 +1382,13 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE(env.markers.get_markers_at(old_start).empty());
     }
 
-    SECTION("terrain clear removes only internally consistent shops")
+    SECTION("terrain clear also repairs inconsistent shops")
     {
         housing_ensure_level(false);
         env.grid(ambiguous_spawn) = DNGN_ENTER_SHOP;
         REQUIRE(env.shop.find(ambiguous_spawn) == env.shop.end());
-        REQUIRE_FALSE(housing_clear_terrain(ambiguous_spawn));
-        REQUIRE(env.grid(ambiguous_spawn) == DNGN_ENTER_SHOP);
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
 
         shop_struct orphan;
         orphan.pos = ambiguous_spawn;
@@ -1219,19 +1396,17 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         orphan.level = 1;
         env.grid(ambiguous_spawn) = DNGN_FLOOR;
         env.shop[ambiguous_spawn] = orphan;
-        REQUIRE_FALSE(housing_clear_terrain(ambiguous_spawn));
-        REQUIRE(env.shop.find(ambiguous_spawn) != env.shop.end());
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.shop.find(ambiguous_spawn) == env.shop.end());
         REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
-        env.shop.erase(ambiguous_spawn);
 
         env.grid(ambiguous_spawn) = DNGN_ENTER_SHOP;
         env.shop[ambiguous_spawn] = orphan;
         env.markers.add(new map_wiz_props_marker(ambiguous_spawn));
-        REQUIRE_FALSE(housing_clear_terrain(ambiguous_spawn));
-        REQUIRE(env.shop.find(ambiguous_spawn) != env.shop.end());
-        REQUIRE(env.grid(ambiguous_spawn) == DNGN_ENTER_SHOP);
-        env.shop.erase(ambiguous_spawn);
-        env.markers.remove_markers_at(ambiguous_spawn);
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.shop.find(ambiguous_spawn) == env.shop.end());
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
 
         env.grid(ambiguous_spawn) = DNGN_ABANDONED_SHOP;
         REQUIRE(housing_clear_terrain(ambiguous_spawn));
@@ -1244,6 +1419,22 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         env.grid(ambiguous_spawn) = DNGN_STONE_WALL;
         REQUIRE(housing_clear_terrain(ambiguous_spawn));
         REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+    }
+
+    SECTION("terrain clear forcibly repairs unsupported protected terrain")
+    {
+        housing_ensure_level(false);
+        env.grid(ambiguous_spawn) = DNGN_ORB_DAIS;
+        const housing_publish_validation before =
+            housing_validate_current_map();
+        REQUIRE_FALSE(before.valid());
+        REQUIRE(before.problem
+                == housing_publish_problem_type::unsupported_feature);
+        REQUIRE(before.position == ambiguous_spawn);
+
+        REQUIRE(housing_clear_terrain(ambiguous_spawn));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(housing_validate_current_map().valid());
     }
 
     SECTION("terrain clear removes every item on the selected square")

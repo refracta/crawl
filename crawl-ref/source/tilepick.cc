@@ -4695,6 +4695,8 @@ tileidx_t tileidx_ability(const ability_type ability)
         return TILEG_ABILITY_WIZ_BUILD_TERRAIN;
     case ABIL_HOUSING_CREATE_VISITOR_STRIP:
         return TILEG_ABILITY_RU_SACRIFICE_DURABILITY;
+    case ABIL_HOUSING_SHOW_COORDINATES:
+        return TILEG_ABILITY_WIZ_SET_TERRAIN;
 
 #ifdef WIZARD
     case ABIL_WIZ_BUILD_TERRAIN:
