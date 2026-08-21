@@ -122,7 +122,7 @@ TEST_CASE("Housing map target validation is strict ASCII", "[single-file]")
     REQUIRE_FALSE(housing_valid_map_target("abc:123456789012345678901"));
 }
 
-TEST_CASE("Housing-created monsters are inert only for their owner",
+TEST_CASE("Housing-created monsters obey owner and visitor activity policy",
           "[single-file]")
 {
     monster placed;
@@ -130,10 +130,71 @@ TEST_CASE("Housing-created monsters are inert only for their owner",
     placed.hit_points = placed.max_hit_points = 1;
     placed.props["housing_created_monster"] = true;
     REQUIRE(housing_monster_was_created(placed));
+    REQUIRE_FALSE(housing_monster_can_act(
+        placed, housing_role_type::owner));
+    REQUIRE(housing_monster_can_act(
+        placed, housing_role_type::visitor));
 
     unwind_var<game_type> saved_game_type(crawl_state.type,
                                           GAME_TYPE_HOUSING);
     REQUIRE(housing_monster_is_owner_inert(placed));
+    REQUIRE(housing_monster_is_inert(placed));
+
+    SECTION("all explicit owner and visitor activity combinations")
+    {
+        const pair<bool, bool> policies[] =
+        {
+            { false, true },
+            { true, true },
+            { false, false },
+            { true, false },
+        };
+        for (const auto &policy : policies)
+        {
+            placed.props["housing_owner_active"] = policy.first;
+            placed.props["housing_visitor_active"] = policy.second;
+            REQUIRE(housing_monster_can_act(
+                placed, housing_role_type::owner) == policy.first);
+            REQUIRE(housing_monster_can_act(
+                placed, housing_role_type::visitor) == policy.second);
+            REQUIRE(housing_monster_can_act(
+                placed, housing_role_type::none));
+            REQUIRE(housing_monster_is_owner_inert(placed)
+                    == !policy.first);
+            REQUIRE(housing_monster_is_inert(placed) == !policy.first);
+        }
+    }
+
+    SECTION("malformed activity policy fails closed")
+    {
+        placed.props["housing_owner_active"] = true;
+        REQUIRE_FALSE(housing_monster_can_act(
+            placed, housing_role_type::owner));
+        REQUIRE_FALSE(housing_monster_can_act(
+            placed, housing_role_type::visitor));
+        REQUIRE(housing_monster_is_inert(placed));
+
+        placed.props["housing_visitor_active"] = 1;
+        REQUIRE_FALSE(housing_monster_can_act(
+            placed, housing_role_type::owner));
+        REQUIRE_FALSE(housing_monster_can_act(
+            placed, housing_role_type::visitor));
+        REQUIRE(housing_monster_can_act(
+            placed, housing_role_type::none));
+    }
+
+    SECTION("malformed creator identity fails closed in Housing")
+    {
+        placed.props["housing_created_monster"] = 1;
+        REQUIRE_FALSE(housing_monster_was_created(placed));
+        REQUIRE_FALSE(housing_monster_can_act(
+            placed, housing_role_type::owner));
+        REQUIRE_FALSE(housing_monster_can_act(
+            placed, housing_role_type::visitor));
+        REQUIRE(housing_monster_can_act(
+            placed, housing_role_type::none));
+        REQUIRE(housing_monster_is_inert(placed));
+    }
 
     crawl_state.type = GAME_TYPE_NORMAL;
     REQUIRE_FALSE(housing_monster_is_owner_inert(placed));
@@ -743,15 +804,16 @@ TEST_CASE("Housing terrain brush geometry and size controls are stable",
 TEST_CASE("Housing snapshot schema is explicit and backwards compatible",
           "[single-file]")
 {
-    REQUIRE(housing_snapshot_schema_version() == 6);
+    REQUIRE(housing_snapshot_schema_version() == 7);
     REQUIRE(housing_snapshot_schema_supported(1));
     REQUIRE(housing_snapshot_schema_supported(2));
     REQUIRE(housing_snapshot_schema_supported(3));
     REQUIRE(housing_snapshot_schema_supported(4));
     REQUIRE(housing_snapshot_schema_supported(5));
     REQUIRE(housing_snapshot_schema_supported(6));
+    REQUIRE(housing_snapshot_schema_supported(7));
     REQUIRE_FALSE(housing_snapshot_schema_supported(0));
-    REQUIRE_FALSE(housing_snapshot_schema_supported(7));
+    REQUIRE_FALSE(housing_snapshot_schema_supported(8));
     REQUIRE_FALSE(housing_snapshot_schema_supported(INT_MAX));
 }
 
@@ -935,6 +997,24 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
     const coord_def template_spawn(21, 20);
     const coord_def ambiguous_spawn(22, 20);
     const coord_def third_passage(23, 20);
+    const coord_def fixture_cells[] =
+    {
+        old_start, template_spawn, ambiguous_spawn, third_passage,
+    };
+    vector<pair<coord_def, unsigned int>> saved_fixture_map_ids;
+    for (const coord_def &pos : fixture_cells)
+    {
+        saved_fixture_map_ids.emplace_back(pos, env.level_map_ids(pos));
+        // These cells are synthetic and are not backed by the shared test
+        // environment's vault table. Detach stale map ids so immediate
+        // off-LOS editor redraws exercise product code without indexing
+        // unrelated fixture storage.
+        env.level_map_ids(pos) = INVALID_MAP_INDEX;
+    }
+    unwinder restore_fixture_map_ids = [&saved_fixture_map_ids]() {
+        for (const auto &entry : saved_fixture_map_ids)
+            env.level_map_ids(entry.first) = entry.second;
+    };
     unwind_var<game_type> saved_game_type(crawl_state.type,
                                           GAME_TYPE_HOUSING);
     unwind_var<bool> saved_on_level(you.on_current_level, true);
@@ -1264,31 +1344,130 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE(env.grid(third_passage) == DNGN_FLOOR);
     }
 
-    SECTION("opaque terrain rejects an unreachable Housing brush")
+    SECTION("opaque terrain does not block remote Housing brushes")
     {
         housing_ensure_level(false);
+        const unsigned int saved_map_id = env.level_map_ids(third_passage);
+        unwinder restore_map_id = [saved_map_id, third_passage]() {
+            env.level_map_ids(third_passage) = saved_map_id;
+        };
+        env.level_map_ids(third_passage) = INVALID_MAP_INDEX;
         env.grid(ambiguous_spawn) = DNGN_ROCK_WALL;
         los_terrain_changed(ambiguous_spawn);
         REQUIRE_FALSE(you.see_cell_no_trans(third_passage));
 
         REQUIRE(wizard_apply_housing_terrain_brush(
                     third_passage, DNGN_STONE_WALL, 1)
-                == housing_terrain_brush_result::rejected);
+                == housing_terrain_brush_result::changed);
         REQUIRE(env.grid(ambiguous_spawn) == DNGN_ROCK_WALL);
-        REQUIRE(env.grid(third_passage) == DNGN_FLOOR);
+        REQUIRE(env.grid(third_passage) == DNGN_STONE_WALL);
     }
 
-    SECTION("out-of-range Housing brushes are rejected without mutation")
+    SECTION("a clear batch is atomic when an actor protects one square")
     {
         housing_ensure_level(false);
-        const coord_def far = old_start + coord_def(LOS_MAX_RANGE + 1, 0);
-        REQUIRE(map_bounds(far));
-        const dungeon_feature_type old_far_feat = env.grid(far);
+        env.grid(ambiguous_spawn) = DNGN_STONE_WALL;
+        item_def gold;
+        gold.clear();
+        gold.base_type = OBJ_GOLD;
+        gold.quantity = 7;
+        const int gold_index = copy_item_to_grid(gold, third_passage);
+        REQUIRE(gold_index != NON_ITEM);
+        unwinder remove_gold = [gold_index]() {
+            if (env.item[gold_index].defined())
+                destroy_item(gold_index);
+        };
 
-        REQUIRE(wizard_apply_housing_terrain_brush(
-                    far, DNGN_STONE_WALL, 1)
-                == housing_terrain_brush_result::rejected);
-        REQUIRE(env.grid(far) == old_far_feat);
+        REQUIRE(housing_clear_terrain_brush(
+                    vector<coord_def>{ambiguous_spawn, third_passage,
+                                      old_start})
+                == housing_clear_brush_result::rejected);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_STONE_WALL);
+        REQUIRE(env.item[gold_index].defined());
+        REQUIRE(env.igrid(third_passage) == gold_index);
+    }
+
+    SECTION("a clear batch preserves its last spawn and every other cell")
+    {
+        housing_ensure_level(false);
+        env.grid(ambiguous_spawn) = DNGN_STONE_WALL;
+        item_def gold;
+        gold.clear();
+        gold.base_type = OBJ_GOLD;
+        gold.quantity = 3;
+        const int gold_index = copy_item_to_grid(gold, ambiguous_spawn);
+        REQUIRE(gold_index != NON_ITEM);
+        unwinder remove_gold = [gold_index]() {
+            if (env.item[gold_index].defined())
+                destroy_item(gold_index);
+        };
+
+        REQUIRE(housing_clear_terrain_brush(
+                    vector<coord_def>{template_spawn, ambiguous_spawn})
+                == housing_clear_brush_result::rejected);
+        REQUIRE(housing_is_spawn(template_spawn));
+        REQUIRE(env.grid(template_spawn) == DNGN_RUNELIGHT);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_STONE_WALL);
+        REQUIRE(env.item[gold_index].defined());
+    }
+
+    SECTION("a clear batch removes terrain and items then reports no-op")
+    {
+        housing_ensure_level(false);
+        const unsigned int saved_ambiguous_map_id =
+            env.level_map_ids(ambiguous_spawn);
+        const unsigned int saved_third_map_id =
+            env.level_map_ids(third_passage);
+        unwinder restore_map_ids = [saved_ambiguous_map_id,
+                                    saved_third_map_id,
+                                    ambiguous_spawn, third_passage]() {
+            env.level_map_ids(ambiguous_spawn) = saved_ambiguous_map_id;
+            env.level_map_ids(third_passage) = saved_third_map_id;
+        };
+        env.level_map_ids(ambiguous_spawn) = INVALID_MAP_INDEX;
+        env.level_map_ids(third_passage) = INVALID_MAP_INDEX;
+        env.grid(ambiguous_spawn) = DNGN_STONE_WALL;
+        env.grid(third_passage) = DNGN_SHALLOW_WATER;
+        item_def gold;
+        gold.clear();
+        gold.base_type = OBJ_GOLD;
+        gold.quantity = 11;
+        const int gold_index = copy_item_to_grid(gold, third_passage);
+        REQUIRE(gold_index != NON_ITEM);
+
+        const vector<coord_def> cells{ambiguous_spawn, third_passage};
+        REQUIRE(housing_clear_terrain_brush(cells)
+                == housing_clear_brush_result::changed);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        REQUIRE(env.grid(third_passage) == DNGN_FLOOR);
+        REQUIRE_FALSE(env.item[gold_index].defined());
+        REQUIRE(housing_clear_terrain_brush(cells)
+                == housing_clear_brush_result::unchanged);
+    }
+
+    SECTION("a damaged fixture rejects a batch but remains repairable alone")
+    {
+        housing_ensure_level(false);
+        const unsigned int saved_map_id =
+            env.level_map_ids(ambiguous_spawn);
+        unwinder restore_map_id = [saved_map_id, ambiguous_spawn]() {
+            env.level_map_ids(ambiguous_spawn) = saved_map_id;
+        };
+        env.level_map_ids(ambiguous_spawn) = INVALID_MAP_INDEX;
+        env.grid(third_passage) = DNGN_STONE_WALL;
+        env.markers.add(new map_wiz_props_marker(ambiguous_spawn));
+
+        REQUIRE(housing_clear_terrain_brush(
+                    vector<coord_def>{ambiguous_spawn, third_passage})
+                == housing_clear_brush_result::rejected);
+        REQUIRE_FALSE(env.markers.get_markers_at(ambiguous_spawn).empty());
+        REQUIRE(env.grid(third_passage) == DNGN_STONE_WALL);
+
+        REQUIRE(housing_clear_terrain_brush(
+                    vector<coord_def>{ambiguous_spawn})
+                == housing_clear_brush_result::changed);
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).empty());
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
     }
 
     SECTION("non-owner Housing edit checks are read-only")
@@ -1298,6 +1477,25 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
                                           GAME_TYPE_NORMAL);
         REQUIRE_FALSE(housing_can_edit(ambiguous_spawn));
         REQUIRE(env.grid(ambiguous_spawn) == old_feat);
+    }
+
+    SECTION("the outer framing ring is never editable")
+    {
+        const coord_def outer_ring(X_BOUND_1, old_start.y);
+        REQUIRE(map_bounds(outer_ring));
+        REQUIRE_FALSE(in_bounds(outer_ring));
+        const dungeon_feature_type old_feat = env.grid(outer_ring);
+        const size_t old_markers =
+            env.markers.get_markers_at(outer_ring).size();
+
+        REQUIRE_FALSE(housing_can_edit(outer_ring));
+        REQUIRE_FALSE(housing_can_edit_ensured(outer_ring));
+        REQUIRE_FALSE(housing_create_local_portal(outer_ring, "edge"));
+        REQUIRE_FALSE(housing_create_visitor_strip(outer_ring));
+        REQUIRE_FALSE(housing_create_portal(outer_ring, "Other:main"));
+        REQUIRE(env.grid(outer_ring) == old_feat);
+        REQUIRE(env.markers.get_markers_at(outer_ring).size()
+                == old_markers);
     }
 
     SECTION("one bare runelight is authenticated and used")
@@ -1570,6 +1768,39 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE(result.message.find("type") != string::npos);
     }
 
+    SECTION("publication rejects a partial monster activity policy")
+    {
+        housing_ensure_level(false);
+        init_monsters();
+        mgen_data mg(MONS_RAT, BEH_HOSTILE, ambiguous_spawn, MHITYOU,
+                     MG_FORBID_BANDS | MG_FORCE_PLACE);
+        mg.extra_flags |= MF_NO_REWARD;
+        monster *created = create_monster(mg);
+        REQUIRE(created != nullptr);
+        unwinder remove_created = [&created]() {
+            if (created && created->alive())
+            {
+                env.mgrid(created->pos()) = NON_MONSTER;
+                created->reset();
+            }
+        };
+        created->props["housing_created_monster"] = true;
+        created->props[NEVER_CORPSE_KEY] = true;
+        created->props["housing_owner_active"] = true;
+
+        const housing_publish_validation damaged =
+            housing_validate_current_map();
+        REQUIRE_FALSE(damaged.valid());
+        REQUIRE(damaged.problem
+                == housing_publish_problem_type::unsafe_monster);
+        REQUIRE(damaged.position == ambiguous_spawn);
+        REQUIRE(damaged.detail == "monster activity settings");
+        REQUIRE(damaged.message.find("owner/visitor") != string::npos);
+
+        created->props["housing_visitor_active"] = false;
+        REQUIRE(housing_validate_current_map().valid());
+    }
+
     SECTION("a Housing kraken is stored as an inert head only")
     {
         housing_ensure_level(false);
@@ -1645,7 +1876,37 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
                 children.push_back(&mons);
         REQUIRE_FALSE(children.empty());
         for (monster *child : children)
+        {
             REQUIRE_FALSE(housing_monster_was_created(*child));
+            REQUIRE_FALSE(housing_monster_can_act(
+                *child, housing_role_type::owner));
+            REQUIRE(housing_monster_can_act(
+                *child, housing_role_type::visitor));
+        }
+
+        // Attached actors inherit the head's explicit role policy without
+        // becoming trusted, publishable Housing fixtures themselves.
+        kraken->props["housing_owner_active"] = true;
+        kraken->props["housing_visitor_active"] = false;
+        for (monster *child : children)
+        {
+            REQUIRE(housing_monster_can_act(
+                *child, housing_role_type::owner));
+            REQUIRE_FALSE(housing_monster_can_act(
+                *child, housing_role_type::visitor));
+        }
+
+        kraken->props["housing_created_monster"] = 1;
+        for (monster *child : children)
+        {
+            REQUIRE_FALSE(housing_monster_can_act(
+                *child, housing_role_type::owner));
+            REQUIRE_FALSE(housing_monster_can_act(
+                *child, housing_role_type::visitor));
+            REQUIRE(housing_monster_can_act(
+                *child, housing_role_type::none));
+        }
+        kraken->props["housing_created_monster"] = true;
 
         monster_die(*kraken, KILL_RESET, NON_MONSTER, true, false, true);
         REQUIRE_FALSE(kraken->alive());

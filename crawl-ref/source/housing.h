@@ -47,9 +47,10 @@ string housing_place();
 
 // Public snapshot compatibility is deliberately explicit: schema 4 adds
 // translucent owner-only barriers, schema 5 adds named passages plus visitor
-// inventory tiles, and schema 6 adds authenticated entrance appearances for
-// portals. Maps without those capabilities keep their lower schema during
-// rolling deployment; readers retain every validated prior format.
+// inventory tiles, schema 6 adds authenticated entrance appearances for
+// portals, and schema 7 adds explicit per-monster owner/visitor activity.
+// Maps without those capabilities keep their lower schema during rolling
+// deployment; readers retain every validated prior format.
 int housing_snapshot_schema_version();
 bool housing_snapshot_schema_supported(int schema);
 
@@ -101,10 +102,22 @@ bool housing_is_spawn(const coord_def &pos);
 // selected existing spawn. Every mutation re-reads the externally managed
 // Housing point balance; a map can never lose its final spawn.
 bool housing_toggle_spawn_point(const coord_def &pos);
-// Clear one Housing cell and destroy its complete ground-item stack.
-// Authenticated portals, spawn points, owner-only barriers and shops receive
-// their own transactional cleanup; ordinary editable terrain is changed
-// directly to floor. The final spawn point itself is always protected.
+enum class housing_clear_brush_result
+{
+    rejected,
+    unchanged,
+    changed,
+};
+// Atomically clear a set of Housing cells and destroy their complete
+// ground-item stacks. Every coordinate and fixture is classified before the
+// first mutation, so an unsafe member rejects the whole set. Authenticated
+// portals, spawn points, owner-only barriers and shops receive their matching
+// cleanup, and the map always retains at least one authenticated spawn.
+housing_clear_brush_result housing_clear_terrain_brush(
+    const vector<coord_def> &cells);
+// One-cell compatibility wrapper over the same transactional clear path. A
+// malformed final spawn is repaired in place, while an exact final spawn is
+// protected (though its explicitly selected item stack can still be cleared).
 bool housing_clear_terrain(const coord_def &pos);
 bool housing_can_edit(const coord_def &pos);
 // Cheap predicate for an already authenticated Housing level. Call
@@ -167,9 +180,13 @@ bool housing_monster_type_allowed(monster_type type);
 // This role-independent identity survives publication and visitor loading so
 // ordinary death cleanup can suppress native monster lifecycle side effects.
 bool housing_monster_was_created(const monster &mons);
-// Editor-created monsters are inert while their owner is arranging the map.
-// The same actors become fully active when the published level is loaded by a
-// visitor, after owner-only barriers have opened.
+// Legacy monsters default to frozen for the owner and active for visitors;
+// newly created monsters carry an explicit policy for both roles.
+bool housing_monster_can_act(const monster &mons, housing_role_type role);
+// Whether this created monster is frozen in the process's current Housing
+// role. A frozen monster cannot move, attack, cast, or use special abilities.
+bool housing_monster_is_inert(const monster &mons);
+// Compatibility helper for owner-specific callers and tests.
 bool housing_monster_is_owner_inert(const monster &mons);
 // Toggle a solid, translucent owner-only wall which is persisted/published
 // but converted to floor for visitors before marker activation and redraw.

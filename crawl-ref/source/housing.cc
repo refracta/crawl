@@ -112,6 +112,10 @@ static const char * const HOUSING_LOCAL_PORTAL_TILE =
 static const char * const HOUSING_SPAWN_MARKER_KEY = "housing_spawn";
 static const char * const HOUSING_VISITOR_WALL_KEY = "housing_visitor_wall";
 static const char * const HOUSING_MONSTER_KEY = "housing_created_monster";
+static const char * const HOUSING_MONSTER_OWNER_ACTIVE_KEY =
+    "housing_owner_active";
+static const char * const HOUSING_MONSTER_VISITOR_ACTIVE_KEY =
+    "housing_visitor_active";
 static const int HOUSING_SNAPSHOT_LEGACY_SCHEMA = 1;
 // Schema 2 permits strictly validated spawn fixtures, Housing monsters and
 // shops. Schema 3 adds visitor-only wall markers; older cores must reject
@@ -131,7 +135,11 @@ static const int HOUSING_SNAPSHOT_MOVEMENT_SCHEMA = 5;
 // named same-level passages. The underlying terrain remains the safe legacy
 // portal/arch substrate; older visitors must reject the extra visual role
 // rather than silently discarding it.
-static const int HOUSING_SNAPSHOT_SCHEMA = 6;
+static const int HOUSING_SNAPSHOT_PORTAL_SKIN_SCHEMA = 6;
+// Schema 7 adds explicit per-monster owner and visitor activity policies.
+// Older visitors must reject these snapshots rather than silently treating a
+// visitor-frozen monster as active.
+static const int HOUSING_SNAPSHOT_SCHEMA = 7;
 static const int HOUSING_MAX_MONSTERS = 64;
 static const int HOUSING_MAX_SHOPS = 32;
 static const int HOUSING_MAX_LOCAL_PORTALS = 128;
@@ -752,6 +760,7 @@ static bool _supported_snapshot_schema(int schema)
            || schema == HOUSING_SNAPSHOT_WALL_SCHEMA
            || schema == HOUSING_SNAPSHOT_WALL_CURRENT_SCHEMA
            || schema == HOUSING_SNAPSHOT_MOVEMENT_SCHEMA
+           || schema == HOUSING_SNAPSHOT_PORTAL_SKIN_SCHEMA
            || schema == HOUSING_SNAPSHOT_SCHEMA;
 }
 
@@ -771,13 +780,14 @@ static void _write_snapshot_meta(package &snapshot, const string &account_id,
     // Keep maps without new fixtures readable by already-running processes
     // during a rolling deployment. Translucent walls require schema 4, while
     // named passages and visitor inventory strips require schema 5; a
-    // selected entrance appearance on either kind of portal requires 6.
+    // selected entrance appearance on either kind of portal requires 6, and
+    // explicit monster activity policy requires 7.
     int schema = HOUSING_SNAPSHOT_WALL_SCHEMA;
     for (map_marker *marker : env.markers.get_all())
     {
         if (_marker_has_key(marker, HOUSING_PORTAL_SKIN_KEY))
         {
-            schema = HOUSING_SNAPSHOT_SCHEMA;
+            schema = HOUSING_SNAPSHOT_PORTAL_SKIN_SCHEMA;
             break;
         }
         if (_local_portal_name_at(marker->pos, nullptr)
@@ -789,6 +799,14 @@ static void _write_snapshot_meta(package &snapshot, const string &account_id,
             schema = std::max(schema,
                               HOUSING_SNAPSHOT_WALL_CURRENT_SCHEMA);
     }
+    for (const monster &mons : menv_real)
+        if (mons.alive()
+            && (mons.props.exists(HOUSING_MONSTER_OWNER_ACTIVE_KEY)
+                || mons.props.exists(HOUSING_MONSTER_VISITOR_ACTIVE_KEY)))
+        {
+            schema = HOUSING_SNAPSHOT_SCHEMA;
+            break;
+        }
     writer output(&snapshot, HOUSING_META_CHUNK);
     marshallInt(output, schema);
     marshallString(output, Version::Long);
@@ -1554,6 +1572,62 @@ static bool _housing_created_monster(const monster &mons)
            && mons.props[HOUSING_MONSTER_KEY].get_bool();
 }
 
+static bool _housing_monster_activity_policy_valid(const monster &mons)
+{
+    const bool has_owner =
+        mons.props.exists(HOUSING_MONSTER_OWNER_ACTIVE_KEY);
+    const bool has_visitor =
+        mons.props.exists(HOUSING_MONSTER_VISITOR_ACTIVE_KEY);
+    if (!has_owner && !has_visitor)
+        return true; // legacy default: owner frozen, visitor active
+    return has_owner && has_visitor
+        && mons.props[HOUSING_MONSTER_OWNER_ACTIVE_KEY].get_type() == SV_BOOL
+        && mons.props[HOUSING_MONSTER_VISITOR_ACTIVE_KEY].get_type()
+            == SV_BOOL;
+}
+
+bool housing_monster_can_act(const monster &mons, housing_role_type role)
+{
+    if (role == housing_role_type::none)
+        return true;
+    if (mons.props.exists(HOUSING_MONSTER_KEY)
+        && !_housing_created_monster(mons))
+    {
+        return false; // damaged editor identity fails closed in Housing
+    }
+    const monster *policy = &mons;
+    if (!_housing_created_monster(*policy)
+        && (mons_is_tentacle_or_tentacle_segment(mons.type)
+            || mons.is_child_monster()))
+    {
+        const monster &head = get_tentacle_head(mons);
+        if (&head != &mons && head.props.exists(HOUSING_MONSTER_KEY))
+            policy = &head;
+    }
+    if (policy->props.exists(HOUSING_MONSTER_KEY)
+        && !_housing_created_monster(*policy))
+    {
+        return false; // damaged attached-head identity also fails closed
+    }
+    if (!_housing_created_monster(*policy))
+        return true;
+    if (!_housing_monster_activity_policy_valid(*policy))
+        return false; // malformed policy fails closed at runtime
+
+    switch (role)
+    {
+    case housing_role_type::owner:
+        return policy->props.exists(HOUSING_MONSTER_OWNER_ACTIVE_KEY)
+            && policy->props[HOUSING_MONSTER_OWNER_ACTIVE_KEY].get_bool();
+    case housing_role_type::visitor:
+        return !policy->props.exists(HOUSING_MONSTER_VISITOR_ACTIVE_KEY)
+            || policy->props[HOUSING_MONSTER_VISITOR_ACTIVE_KEY].get_bool();
+    case housing_role_type::none:
+        break;
+    }
+    return true;
+}
+
 static bool _suppress_legacy_housing_monster_remains()
 {
     bool changed = false;
@@ -2080,62 +2154,6 @@ static void _force_clear_housing_cell_to_floor(const coord_def &pos)
     }
 }
 
-static bool _repair_or_remove_malformed_spawn(
-    const coord_def &pos, vector<coord_def> &spawns)
-{
-    if (actor_at(pos) && pos != you.pos())
-    {
-        mpr("That damaged Housing spawn point is occupied and cannot be "
-            "repaired safely.");
-        return false;
-    }
-
-    bool has_other_spawn = false;
-    for (const coord_def &other : spawns)
-        if (other != pos && _spawn_marker_at(other))
-        {
-            has_other_spawn = true;
-            break;
-        }
-
-    _discard_housing_shop_state_at(pos);
-    env.markers.remove_markers_at(pos);
-    _force_clear_housing_cell_to_floor(pos);
-    if (has_other_spawn)
-    {
-        spawns.erase(std::remove(spawns.begin(), spawns.end(), pos),
-                     spawns.end());
-        _store_spawns(spawns);
-        mpr("The damaged Housing spawn point is cleared.");
-        return true;
-    }
-
-    // Never leave a map without a spawn. If this was the last authenticated
-    // candidate, normalize the selected coordinate into one exact fixture
-    // instead of deleting it.
-    dungeon_terrain_changed(pos, DNGN_RUNELIGHT, false, false, true);
-    if (!_ensure_spawn_fixture(pos))
-        fail("Housing spawn repair was not atomic");
-    _store_spawns(vector<coord_def>{pos});
-    mpr("The final Housing spawn point is repaired.");
-    return true;
-}
-
-static bool _clear_malformed_housing_fixture(const coord_def &pos)
-{
-    if (actor_at(pos) && pos != you.pos())
-    {
-        mpr("That damaged Housing fixture is occupied and cannot be cleared "
-            "safely.");
-        return false;
-    }
-    _discard_housing_shop_state_at(pos);
-    env.markers.remove_markers_at(pos);
-    _force_clear_housing_cell_to_floor(pos);
-    mpr("The damaged Housing fixture is cleared.");
-    return true;
-}
-
 static bool _remove_housing_visitor_wall(const coord_def &pos)
 {
     if (!_visitor_wall_marker_at(pos) || actor_at(pos)
@@ -2167,23 +2185,6 @@ static bool _housing_local_portal_state_at(const coord_def &pos)
     return _fixture_key_state_at(pos, HOUSING_LOCAL_PORTAL_KEY);
 }
 
-static bool _remove_housing_local_portal(const coord_def &pos)
-{
-    if (!_local_portal_name_at(pos, nullptr)
-        || (actor_at(pos) && pos != you.pos())
-        || env.igrid(pos) != NON_ITEM || housing_is_spawn(pos))
-    {
-        mpr("That named Housing passage cannot be removed safely.");
-        return false;
-    }
-
-    map_marker *marker = env.markers.get_markers_at(pos).front();
-    env.markers.remove(marker);
-    _clear_housing_cell_to_floor(pos);
-    mpr("The named Housing passage is removed.");
-    return true;
-}
-
 static bool _housing_visitor_strip_state_at(const coord_def &pos)
 {
     return env.grid(pos) == DNGN_TRANSPORTER_LANDING
@@ -2197,159 +2198,456 @@ bool housing_movement_fixture_is_reserved(const coord_def &pos)
             || _housing_visitor_strip_state_at(pos));
 }
 
-static bool _remove_housing_visitor_strip(const coord_def &pos)
+enum class _housing_clear_operation
 {
-    if (!_visitor_strip_marker_at(pos)
-        || (actor_at(pos) && pos != you.pos())
-        || env.igrid(pos) != NON_ITEM || housing_is_spawn(pos))
-    {
-        mpr("That visitor inventory tile cannot be removed safely.");
-        return false;
-    }
+    unchanged,
+    clear_ordinary,
+    keep_final_spawn,
+    remove_spawn,
+    remove_visitor_wall,
+    remove_local_portal,
+    remove_visitor_strip,
+    remove_portal,
+    remove_shop,
+    clear_malformed,
+    repair_final_spawn,
+};
 
-    map_marker *marker = env.markers.get_markers_at(pos).front();
-    env.markers.remove(marker);
-    _clear_housing_cell_to_floor(pos);
-    mpr("The visitor inventory tile is removed.");
-    return true;
+struct _housing_clear_cell_plan
+{
+    coord_def pos;
+    _housing_clear_operation operation;
+    bool had_items;
+};
+
+struct _housing_clear_plan
+{
+    vector<_housing_clear_cell_plan> cells;
+    vector<coord_def> spawns_after;
+    bool store_spawns = false;
+    bool changes_state = false;
+};
+
+static bool _housing_clear_floor_is_unchanged(const coord_def &pos)
+{
+    // tile_init_flavour() gives ordinary floor squares a deterministic,
+    // non-zero `special` value. Clear resets and immediately recreates it, so
+    // it is not by itself an observable edit. The fields below are the state
+    // that _clear_housing_cell_to_floor() actually removes from an existing
+    // floor.
+    return env.grid(pos) == DNGN_FLOOR && env.igrid(pos) == NON_ITEM
+        && tile_env.flv(pos).feat == 0 && env.grid_colours(pos) == 0
+        && !testbits(env.pgrid(pos), FPROP_MIMIC);
 }
 
-static bool _remove_housing_portal(const coord_def &pos)
+static bool _housing_clear_player_may_remain(
+    _housing_clear_operation operation)
 {
-    if (!_portal_target_at(pos, nullptr)
-        || (actor_at(pos) && pos != you.pos())
-        || env.igrid(pos) != NON_ITEM || housing_is_spawn(pos))
+    switch (operation)
     {
-        mpr("That Housing portal cannot be removed safely.");
+    case _housing_clear_operation::keep_final_spawn:
+    case _housing_clear_operation::remove_spawn:
+    case _housing_clear_operation::remove_local_portal:
+    case _housing_clear_operation::remove_visitor_strip:
+    case _housing_clear_operation::remove_portal:
+    case _housing_clear_operation::remove_shop:
+    case _housing_clear_operation::clear_malformed:
+    case _housing_clear_operation::repair_final_spawn:
+        return true;
+    case _housing_clear_operation::unchanged:
+    case _housing_clear_operation::clear_ordinary:
+    case _housing_clear_operation::remove_visitor_wall:
         return false;
     }
-
-    map_marker *marker = env.markers.get_markers_at(pos).front();
-    env.markers.remove(marker);
-    _clear_housing_cell_to_floor(pos);
-    mpr("The Housing portal is removed.");
-    return true;
+    return false;
 }
 
-static bool _remove_housing_shop(const coord_def &pos)
+static bool _plan_housing_clear(const vector<coord_def> &cells,
+                                _housing_clear_plan &plan)
 {
-    const dungeon_feature_type feat = env.grid(pos);
-    const auto found = env.shop.find(pos);
-    const bool active = feat == DNGN_ENTER_SHOP;
-    const bool abandoned = feat == DNGN_ABANDONED_SHOP;
-
-    // Only erase a complete active shop pair, or an exhausted shop with no
-    // remaining shop record. A mismatched grid/table pair is corrupted state,
-    // not ordinary terrain which the editor may partially destroy.
-    if ((!active && !abandoned)
-        || (active && !_housing_shop_can_be_published(pos))
-        || (abandoned && found != env.shop.end())
-        || !env.markers.get_markers_at(pos).empty()
-        || env.igrid(pos) != NON_ITEM
-        || (actor_at(pos) && pos != you.pos()))
+    if (cells.empty())
     {
-        mpr("That Housing shop cannot be removed safely.");
+        mpr("The Housing clear brush is empty.");
         return false;
     }
 
-    if (active)
+    set<coord_def> selected;
+    for (const coord_def &pos : cells)
     {
-        destroy_shop_at(pos);
-        if (env.shop.find(pos) != env.shop.end()
-            || env.grid(pos) != DNGN_ABANDONED_SHOP)
+        if (!map_bounds(pos) || !in_bounds(pos))
         {
-            fail("Housing shop removal was not atomic");
+            mprf("The Housing clear brush leaves the map at (%d,%d); "
+                 "nothing was cleared.", pos.x, pos.y);
+            return false;
+        }
+        if (!selected.insert(pos).second)
+        {
+            mpr("The Housing clear brush contains a duplicate square; "
+                "nothing was cleared.");
+            return false;
         }
     }
-    _clear_housing_cell_to_floor(pos);
-    mpr("The Housing shop is removed.");
+
+    const vector<coord_def> stored_spawns = _stored_spawns();
+    plan.spawns_after = stored_spawns;
+    int canonical_spawns_outside = 0;
+    for (const coord_def &spawn : stored_spawns)
+        if (_spawn_marker_at(spawn) && !selected.count(spawn))
+            ++canonical_spawns_outside;
+
+    bool selected_exact_spawn = false;
+    bool selected_malformed_spawn = false;
+    for (const coord_def &pos : cells)
+    {
+        const bool raw_spawn = _raw_stored_spawns_contain(pos);
+        const bool exact_spawn = raw_spawn && _spawn_marker_at(pos);
+        if (exact_spawn)
+            selected_exact_spawn = true;
+        else if (raw_spawn || env.grid(pos) == DNGN_RUNELIGHT)
+            selected_malformed_spawn = true;
+    }
+
+    // Multi-cell removal must never pick a survivor according to iteration
+    // order. A stamp containing every authenticated spawn is rejected as one
+    // unit; the owner can move or add a spawn and retry.
+    if (cells.size() > 1 && selected_exact_spawn
+        && canonical_spawns_outside == 0)
+    {
+        mpr("Every Housing map must keep at least one spawn point; "
+            "nothing was cleared.");
+        return false;
+    }
+    // Malformed fixtures are deliberately repairable at the exact coordinate
+    // printed by publication diagnostics. Extending that destructive repair
+    // implicitly across a brush would make unrelated damage ambiguous.
+    if (cells.size() > 1 && selected_malformed_spawn)
+    {
+        mpr("The Housing clear brush includes a damaged spawn point. "
+            "Clear that square by itself.");
+        return false;
+    }
+
+    bool has_spawn_after = canonical_spawns_outside > 0;
+    for (const coord_def &pos : cells)
+    {
+        const bool raw_spawn = _raw_stored_spawns_contain(pos);
+        const bool exact_spawn = raw_spawn && _spawn_marker_at(pos);
+        const bool malformed_spawn = !exact_spawn
+            && (raw_spawn || env.grid(pos) == DNGN_RUNELIGHT);
+        const bool has_items = env.igrid(pos) != NON_ITEM;
+        _housing_clear_operation operation;
+        bool malformed = false;
+
+        if (exact_spawn)
+        {
+            if (canonical_spawns_outside == 0)
+            {
+                operation = _housing_clear_operation::keep_final_spawn;
+                has_spawn_after = true;
+            }
+            else
+            {
+                operation = _housing_clear_operation::remove_spawn;
+                plan.spawns_after.erase(
+                    std::remove(plan.spawns_after.begin(),
+                                plan.spawns_after.end(), pos),
+                    plan.spawns_after.end());
+                plan.store_spawns = true;
+            }
+        }
+        else if (malformed_spawn)
+        {
+            // This branch is necessarily a one-cell repair after the check
+            // above. Preserve the old recovery behaviour: remove the damaged
+            // coordinate when another authenticated spawn exists, otherwise
+            // normalise this coordinate into the sole exact fixture.
+            if (canonical_spawns_outside > 0)
+            {
+                operation = _housing_clear_operation::clear_malformed;
+                plan.spawns_after.erase(
+                    std::remove(plan.spawns_after.begin(),
+                                plan.spawns_after.end(), pos),
+                    plan.spawns_after.end());
+            }
+            else
+            {
+                operation = _housing_clear_operation::repair_final_spawn;
+                plan.spawns_after.assign(1, pos);
+                has_spawn_after = true;
+            }
+            plan.store_spawns = true;
+        }
+        else if (_visitor_wall_marker_at(pos))
+            operation = _housing_clear_operation::remove_visitor_wall;
+        else if (_local_portal_name_at(pos, nullptr))
+            operation = _housing_clear_operation::remove_local_portal;
+        else if (_housing_local_portal_state_at(pos))
+        {
+            operation = _housing_clear_operation::clear_malformed;
+            malformed = true;
+        }
+        else if (_visitor_strip_marker_at(pos))
+            operation = _housing_clear_operation::remove_visitor_strip;
+        else if (_housing_visitor_strip_state_at(pos))
+        {
+            operation = _housing_clear_operation::clear_malformed;
+            malformed = true;
+        }
+        else if (_portal_target_at(pos, nullptr))
+            operation = _housing_clear_operation::remove_portal;
+        else if (_housing_portal_state_at(pos))
+        {
+            operation = _housing_clear_operation::clear_malformed;
+            malformed = true;
+        }
+        else if (env.grid(pos) == DNGN_ENTER_SHOP
+                 || env.grid(pos) == DNGN_ABANDONED_SHOP
+                 || env.shop.find(pos) != env.shop.end())
+        {
+            const bool exact_active = env.grid(pos) == DNGN_ENTER_SHOP
+                && _housing_shop_can_be_published(pos)
+                && env.markers.get_markers_at(pos).empty();
+            const bool exact_abandoned =
+                env.grid(pos) == DNGN_ABANDONED_SHOP
+                && env.shop.find(pos) == env.shop.end()
+                && env.markers.get_markers_at(pos).empty();
+            if (exact_active || exact_abandoned)
+                operation = _housing_clear_operation::remove_shop;
+            else
+            {
+                operation = _housing_clear_operation::clear_malformed;
+                malformed = true;
+            }
+        }
+        else if (!env.markers.get_markers_at(pos).empty()
+                 || !is_valid_feature_type(env.grid(pos))
+                 || !housing_feature_allowed(env.grid(pos)))
+        {
+            operation = _housing_clear_operation::clear_malformed;
+            malformed = true;
+        }
+        else
+        {
+            operation = _housing_clear_floor_is_unchanged(pos)
+                        ? _housing_clear_operation::unchanged
+                        : _housing_clear_operation::clear_ordinary;
+        }
+
+        if (malformed && cells.size() > 1)
+        {
+            mprf("The Housing clear brush includes a damaged fixture at "
+                 "(%d,%d). Clear that square by itself.", pos.x, pos.y);
+            return false;
+        }
+
+        actor *occupant = actor_at(pos);
+        if (occupant
+            && (occupant != &you
+                || !_housing_clear_player_may_remain(operation)))
+        {
+            mprf("The Housing clear brush includes an occupied square at "
+                 "(%d,%d); nothing was cleared.", pos.x, pos.y);
+            return false;
+        }
+
+        const bool structural_change =
+            operation != _housing_clear_operation::unchanged
+            && operation != _housing_clear_operation::keep_final_spawn;
+        plan.changes_state = plan.changes_state || structural_change
+                             || has_items;
+        plan.cells.push_back({pos, operation, has_items});
+    }
+
+    if (!has_spawn_after)
+    {
+        mpr("This Housing map has no authenticated spawn point; "
+            "nothing was cleared.");
+        return false;
+    }
     return true;
+}
+
+housing_clear_brush_result housing_clear_terrain_brush(
+    const vector<coord_def> &cells)
+{
+    // Authorization is performed exactly once for the entire stamp. The
+    // planner below is read-only: items, markers, shops, terrain and spawn
+    // metadata remain untouched until every member has passed validation.
+    if (!housing_authorize_action("clear terrain", 0))
+        return housing_clear_brush_result::rejected;
+
+    if (cells.empty())
+    {
+        _housing_clear_plan rejected_plan;
+        (void) _plan_housing_clear(cells, rejected_plan);
+        return housing_clear_brush_result::rejected;
+    }
+
+    // Normal entry authentication is idempotent and preserves the legacy
+    // migration behaviour of one-cell Clear. Do not invoke the strict
+    // validator when the selected coordinate is itself a damaged spawn: that
+    // is precisely the publisher-diagnostic repair path which must remain
+    // reachable. Bounds and duplicate checks precede either path so a rejected
+    // remote stamp cannot trigger an unrelated migration.
+    set<coord_def> selected;
+    bool selected_malformed_spawn = false;
+    for (const coord_def &pos : cells)
+    {
+        if (!map_bounds(pos) || !in_bounds(pos)
+            || !selected.insert(pos).second)
+        {
+            // The read-only planner emits the stable user-facing diagnostic.
+            _housing_clear_plan rejected_plan;
+            (void) _plan_housing_clear(cells, rejected_plan);
+            return housing_clear_brush_result::rejected;
+        }
+        const bool raw_spawn = _raw_stored_spawns_contain(pos);
+        selected_malformed_spawn = selected_malformed_spawn
+            || (raw_spawn && !_spawn_marker_at(pos))
+            || (env.grid(pos) == DNGN_RUNELIGHT && !raw_spawn);
+    }
+    if (!selected_malformed_spawn)
+        housing_ensure_level();
+
+    _housing_clear_plan plan;
+    if (!_plan_housing_clear(cells, plan))
+        return housing_clear_brush_result::rejected;
+    if (!plan.changes_state)
+    {
+        if (plan.cells.size() == 1
+            && plan.cells.front().operation
+                == _housing_clear_operation::keep_final_spawn)
+        {
+            mpr("Every Housing map must keep at least one spawn point.");
+        }
+        else
+            mpr("Every square in that Housing clear brush is already clear.");
+        return housing_clear_brush_result::unchanged;
+    }
+
+    coord_def repair_spawn = INVALID_COORD;
+    std::unique_ptr<map_wiz_props_marker> repair_marker;
+    for (const _housing_clear_cell_plan &cell : plan.cells)
+        if (cell.operation == _housing_clear_operation::repair_final_spawn)
+        {
+            repair_spawn = cell.pos;
+            repair_marker.reset(new map_wiz_props_marker(cell.pos));
+            repair_marker->set_property(HOUSING_SPAWN_MARKER_KEY, "yes");
+            repair_marker->set_property("feature_description",
+                                        "housing spawn point");
+            repair_marker->set_property("veto_destroy", "veto");
+            break;
+        }
+
+    int terrain_cells = 0;
+    for (const _housing_clear_cell_plan &cell : plan.cells)
+    {
+        switch (cell.operation)
+        {
+        case _housing_clear_operation::unchanged:
+        case _housing_clear_operation::keep_final_spawn:
+            break;
+        case _housing_clear_operation::clear_ordinary:
+            _clear_housing_cell_to_floor(cell.pos);
+            ++terrain_cells;
+            break;
+        case _housing_clear_operation::remove_spawn:
+        case _housing_clear_operation::remove_visitor_wall:
+        case _housing_clear_operation::remove_local_portal:
+        case _housing_clear_operation::remove_visitor_strip:
+        case _housing_clear_operation::remove_portal:
+            env.markers.remove_markers_at(cell.pos);
+            _clear_housing_cell_to_floor(cell.pos);
+            ++terrain_cells;
+            break;
+        case _housing_clear_operation::remove_shop:
+            if (env.grid(cell.pos) == DNGN_ENTER_SHOP)
+            {
+                // Exact-shop preflight makes shop_at()'s structural asserts
+                // safe and preserves the ordinary overview cleanup semantics.
+                destroy_shop_at(cell.pos);
+                ASSERT(env.shop.find(cell.pos) == env.shop.end()
+                       && env.grid(cell.pos) == DNGN_ABANDONED_SHOP);
+            }
+            else
+                _discard_housing_shop_state_at(cell.pos);
+            _clear_housing_cell_to_floor(cell.pos);
+            ++terrain_cells;
+            break;
+        case _housing_clear_operation::clear_malformed:
+            _discard_housing_shop_state_at(cell.pos);
+            env.markers.remove_markers_at(cell.pos);
+            _force_clear_housing_cell_to_floor(cell.pos);
+            ++terrain_cells;
+            break;
+        case _housing_clear_operation::repair_final_spawn:
+            ASSERT(repair_marker && repair_spawn == cell.pos);
+            _discard_housing_shop_state_at(cell.pos);
+            env.markers.remove_markers_at(cell.pos);
+            _force_clear_housing_cell_to_floor(cell.pos);
+            dungeon_terrain_changed(cell.pos, DNGN_RUNELIGHT,
+                                    false, false, true);
+            env.markers.add(repair_marker.release());
+            ++terrain_cells;
+            break;
+        }
+    }
+
+    if (plan.store_spawns)
+        _store_spawns(plan.spawns_after);
+
+    bool items_cleared = false;
+    for (const _housing_clear_cell_plan &cell : plan.cells)
+        items_cleared = _clear_housing_items(cell.pos) || items_cleared;
+
+    // The planner proved this invariant against the immutable pre-commit
+    // state. Recheck it as an internal assertion after the single spawn-table
+    // write; ordinary user input can never reach a partially cleared map.
+    bool has_spawn = false;
+    for (const coord_def &spawn : _stored_spawns())
+        if (_spawn_marker_at(spawn))
+        {
+            has_spawn = true;
+            break;
+        }
+    if (!has_spawn)
+        fail("Housing clear lost the final spawn after a successful preflight");
+    if (repair_spawn != INVALID_COORD && !_spawn_marker_at(repair_spawn))
+        fail("Housing final spawn repair was not atomic");
+
+    for (const _housing_clear_cell_plan &cell : plan.cells)
+    {
+        const bool structural_change =
+            cell.operation != _housing_clear_operation::unchanged
+            && cell.operation != _housing_clear_operation::keep_final_spawn;
+        if (!structural_change && !cell.had_items)
+        {
+            continue;
+        }
+        // These helpers are safe for cells outside current LOS (the knowledge
+        // update is a no-op there) and keep console/WebTiles caches coherent
+        // when the editor is panned away from the player.
+        show_update_at(cell.pos);
+        StashTrack.update_stash(cell.pos);
+        redraw_view_at(cell.pos);
+    }
+
+    if (repair_spawn != INVALID_COORD)
+        mpr("The final Housing spawn point is repaired.");
+    else if (terrain_cells > 0)
+    {
+        mprf("%d Housing square%s cleared.", terrain_cells,
+             terrain_cells == 1 ? " is" : "s are");
+    }
+    else if (items_cleared)
+        mpr("The protected final spawn point is left in place.");
+    return housing_clear_brush_result::changed;
 }
 
 bool housing_clear_terrain(const coord_def &pos)
 {
-    if (!housing_authorize_action("clear terrain", 0) || !map_bounds(pos))
-        return false;
-
-    // Entry normally authenticates the spawn set. Do not run that strict
-    // validator again when the owner has deliberately selected a damaged
-    // spawn for repair: it would throw before Clear could fix the coordinate
-    // named by the publication diagnostic.
-    vector<coord_def> spawns = _stored_spawns();
-    // _stored_spawns() deliberately filters entries whose terrain is no longer
-    // floor/runelight. Clear still needs tolerant raw membership so a damaged
-    // final spawn can reach the repair path instead of strict migration.
-    bool selected_stored_spawn = _raw_stored_spawns_contain(pos);
-    const bool exact_spawn = _spawn_marker_at(pos);
-    const bool repairing_spawn =
-        (selected_stored_spawn && !exact_spawn)
-        || (env.grid(pos) == DNGN_RUNELIGHT && !selected_stored_spawn);
-    if (!repairing_spawn)
-    {
-        housing_ensure_level();
-        spawns = _stored_spawns();
-        selected_stored_spawn =
-            std::find(spawns.begin(), spawns.end(), pos) != spawns.end();
-    }
-    const bool items_cleared = _clear_housing_items(pos);
-    if (selected_stored_spawn)
-    {
-        if (_spawn_marker_at(pos))
-            return _remove_housing_spawn(pos, spawns) || items_cleared;
-        return _repair_or_remove_malformed_spawn(pos, spawns)
-               || items_cleared;
-    }
-    if (env.grid(pos) == DNGN_RUNELIGHT)
-        return _repair_or_remove_malformed_spawn(pos, spawns)
-               || items_cleared;
-    if (_visitor_wall_marker_at(pos))
-        return _remove_housing_visitor_wall(pos) || items_cleared;
-    if (_local_portal_name_at(pos, nullptr))
-        return _remove_housing_local_portal(pos) || items_cleared;
-    if (_housing_local_portal_state_at(pos))
-        return _clear_malformed_housing_fixture(pos) || items_cleared;
-    if (_visitor_strip_marker_at(pos))
-        return _remove_housing_visitor_strip(pos) || items_cleared;
-    if (_housing_visitor_strip_state_at(pos))
-        return _clear_malformed_housing_fixture(pos) || items_cleared;
-    if (_portal_target_at(pos, nullptr))
-        return _remove_housing_portal(pos) || items_cleared;
-    if (_housing_portal_state_at(pos))
-        return _clear_malformed_housing_fixture(pos) || items_cleared;
-    if (env.grid(pos) == DNGN_ENTER_SHOP
-        || env.grid(pos) == DNGN_ABANDONED_SHOP
-        || env.shop.find(pos) != env.shop.end())
-    {
-        const bool exact_active = env.grid(pos) == DNGN_ENTER_SHOP
-            && _housing_shop_can_be_published(pos)
-            && env.markers.get_markers_at(pos).empty();
-        const bool exact_abandoned =
-            env.grid(pos) == DNGN_ABANDONED_SHOP
-            && env.shop.find(pos) == env.shop.end()
-            && env.markers.get_markers_at(pos).empty();
-        if (!exact_active && !exact_abandoned)
-            return _clear_malformed_housing_fixture(pos) || items_cleared;
-        return _remove_housing_shop(pos) || items_cleared;
-    }
-    // Exact fixtures have already returned above. Anything left with a
-    // marker, a reserved runelight, or terrain outside the publication
-    // allowlist is damaged state selected explicitly by the owner for
-    // destructive repair.
-    if (!env.markers.get_markers_at(pos).empty()
-        || env.grid(pos) == DNGN_RUNELIGHT
-        || !is_valid_feature_type(env.grid(pos))
-        || !housing_feature_allowed(env.grid(pos)))
-    {
-        return _clear_malformed_housing_fixture(pos) || items_cleared;
-    }
-    if (!housing_can_edit(pos))
-    {
-        mpr("That square is protected in Housing.");
-        return items_cleared;
-    }
-
-    _clear_housing_cell_to_floor(pos);
-    return true;
+    return housing_clear_terrain_brush(vector<coord_def>{pos})
+           == housing_clear_brush_result::changed;
 }
 
 bool housing_toggle_spawn_point(const coord_def &pos)
@@ -2411,7 +2709,8 @@ bool housing_toggle_spawn_point(const coord_def &pos)
 
 bool housing_can_edit(const coord_def &pos)
 {
-    if (!housing_is_owner() || !map_bounds(pos) || actor_at(pos)
+    if (!housing_is_owner() || !map_bounds(pos) || !in_bounds(pos)
+        || actor_at(pos)
         || env.igrid(pos) != NON_ITEM
         || !env.markers.get_markers_at(pos).empty()
         || env.shop.find(pos) != env.shop.end())
@@ -2424,7 +2723,8 @@ bool housing_can_edit(const coord_def &pos)
 
 bool housing_can_edit_ensured(const coord_def &pos)
 {
-    if (!housing_is_owner() || !map_bounds(pos) || actor_at(pos)
+    if (!housing_is_owner() || !map_bounds(pos) || !in_bounds(pos)
+        || actor_at(pos)
         || env.igrid(pos) != NON_ITEM
         || !env.markers.get_markers_at(pos).empty()
         || env.shop.find(pos) != env.shop.end())
@@ -2918,11 +3218,11 @@ bool housing_monster_type_allowed(monster_type type)
         || mons_is_pghost(type)
         || mons_class_is_test(type) || mons_class_is_zombified(type)
         || mons_is_projectile(type) || mons_is_seeker(type)
-        // A Housing owner keeps editor-created monsters completely inert,
-        // so a stored kraken head cannot create child tentacles or ink.
-        // Visitors act on a disposable snapshot and may fight the kraken
-        // normally. Keep every other tentacle head, and all directly
-        // creatable tentacle pieces, out of canonical maps.
+        // A frozen Housing kraken cannot create child tentacles or ink. An
+        // owner who explicitly activates it accepts that temporary children
+        // or clouds may block publication until they disappear. Keep every
+        // other tentacle head, and all directly creatable tentacle pieces,
+        // out of canonical maps.
         || (mons_is_tentacle_head(type) && type != MONS_KRAKEN)
         || mons_is_tentacle_or_tentacle_segment(type)
         || mons_class_flag(type, M_CANT_SPAWN | M_UNFINISHED | M_UNSTABLE
@@ -2936,13 +3236,102 @@ bool housing_monster_type_allowed(monster_type type)
 bool housing_monster_is_owner_inert(const monster &mons)
 {
     return housing_is_owner() && mons.alive()
-        && _housing_created_monster(mons);
+        && _housing_created_monster(mons)
+        && !housing_monster_can_act(mons, housing_role_type::owner);
+}
+
+bool housing_monster_is_inert(const monster &mons)
+{
+    const housing_role_type role = housing_current_role();
+    return role != housing_role_type::none && mons.alive()
+        && !housing_monster_can_act(mons, role);
 }
 
 bool housing_monster_was_created(const monster &mons)
 {
     return _housing_created_monster(mons);
 }
+
+struct _housing_monster_activity_choice
+{
+    const char *label;
+    bool owner_active;
+    bool visitor_active;
+};
+
+static bool _choose_housing_monster_activity(bool &owner_active,
+                                              bool &visitor_active)
+{
+    static const _housing_monster_activity_choice choices[] =
+    {
+        { "Owner can act: No; visitors can act: Yes "
+          "<darkgrey>[default]</darkgrey>",
+          false, true },
+        { "Owner can act: Yes; visitors can act: Yes", true, true },
+        { "Owner can act: No; visitors can act: No", false, false },
+        { "Owner can act: Yes; visitors can act: No", true, false },
+    };
+
+    Menu menu(MF_SINGLESELECT | MF_ARROWS_SELECT | MF_INIT_HOVER
+              | MF_ALLOW_FORMATTING);
+    menu.set_title(new MenuEntry(
+        "Choose when these Housing monsters can act", MEL_TITLE));
+    menu.set_more("Active monsters can move, attack, cast spells, summon, "
+                  "create tentacles or clouds, and use other abilities. "
+                  "Esc cancels this placement batch.");
+    vector<int> values;
+    values.reserve(ARRAYSZ(choices));
+    for (int i = 0; i < static_cast<int>(ARRAYSZ(choices)); ++i)
+    {
+        values.push_back(i);
+        auto *entry = new MenuEntry(choices[i].label, MEL_ITEM, 1,
+                                    static_cast<char>('a' + i));
+        entry->data = &values.back();
+        menu.add_entry(entry);
+    }
+
+    // Enter must choose the documented default even when the user's
+    // menu_arrow_control option disables MF_INIT_HOVER.
+    menu.set_hovered(0, true);
+    const vector<MenuEntry*> selected = menu.show();
+    if (selected.empty())
+        return false;
+    const int choice = *static_cast<int*>(selected[0]->data);
+    ASSERT_RANGE(choice, 0, static_cast<int>(ARRAYSZ(choices)));
+    owner_active = choices[choice].owner_active;
+    visitor_active = choices[choice].visitor_active;
+    mprf("These monsters can act for the owner: %s; for visitors: %s.",
+         owner_active ? "Yes" : "No", visitor_active ? "Yes" : "No");
+    return true;
+}
+
+class housing_monster_editor_targeter : public targeter
+{
+public:
+    housing_monster_editor_targeter()
+    {
+        agent = &you;
+        origin = aim = you.pos();
+    }
+
+    bool valid_aim(coord_def pos) override
+    {
+        if (!map_bounds(pos) || !in_bounds(pos))
+        {
+            why_not = "That square is outside the editable Housing map.";
+            return false;
+        }
+        return true;
+    }
+
+    bool can_affect_unseen() override { return true; }
+    bool can_affect_walls() override { return true; }
+    bool harmful_to_player() override { return false; }
+    aff_type is_affected(coord_def pos) override
+    {
+        return valid_aim(aim) && pos == aim ? AFF_YES : AFF_NO;
+    }
+};
 
 bool housing_create_monster()
 {
@@ -2974,21 +3363,30 @@ bool housing_create_monster()
         mpr("That monster cannot be created in Housing.");
         return false;
     }
+    bool owner_active = false;
+    bool visitor_active = true;
+    if (!_choose_housing_monster_activity(owner_active, visitor_active))
+    {
+        canned_msg(MSG_OK);
+        return false;
+    }
     // Match the wizard flow: settle the requested type once, then keep a
     // WebTiles-compatible cell targeter open until the editor explicitly
     // cancels it. Quivered activation reaches this same chooser instead of
     // borrowing hostile autofight targeting.
-    targeter_smite hitfunc(&you, LOS_MAX_RANGE, 0, 0,
-                           true, false, false);
+    housing_monster_editor_targeter hitfunc;
     direction_chooser_args args;
     args.hitfunc = &hitfunc;
     args.restricts = DIR_ENFORCE_RANGE;
     args.mode = TARG_NON_ACTOR;
-    args.range = LOS_MAX_RANGE;
+    args.range = -1;
     args.needs_path = false;
     args.self = housing_editor_self_target_policy();
     args.top_prompt = "Place housing monster: <w>" +
                       mons_type_name(type, DESC_PLAIN) + "</w>\n"
+                      "Owner can act: <w>" + (owner_active ? "Yes" : "No")
+                      + "</w>; visitors can act: <w>"
+                      + (visitor_active ? "Yes" : "No") + "</w>.\n"
                       "[<w>Space/Enter/.</w>] place and continue, "
                       "[<w>Esc</w>] finish.";
 
@@ -3024,10 +3422,8 @@ bool housing_create_monster()
 
         // The chooser is advisory. Recheck every mutation invariant here so
         // scripted/replayed targets cannot overwrite actors, items,
-        // authenticated fixtures, spawns, unseen cells, or map bounds.
+        // authenticated fixtures, spawns, or map bounds.
         if (!map_bounds(place) || !in_bounds(place)
-            || (place - you.pos()).rdist() > LOS_MAX_RANGE
-            || !you.see_cell_no_trans(place)
             || actor_at(place) || env.igrid(place) != NON_ITEM
             || !env.markers.get_markers_at(place).empty()
             || housing_is_spawn(place))
@@ -3053,6 +3449,8 @@ bool housing_create_monster()
             continue;
         }
         created->props[HOUSING_MONSTER_KEY] = true;
+        created->props[HOUSING_MONSTER_OWNER_ACTIVE_KEY] = owner_active;
+        created->props[HOUSING_MONSTER_VISITOR_ACTIVE_KEY] = visitor_active;
         created->props[NEVER_CORPSE_KEY] = true;
         // Treat only equipment generated as part of this editor action as
         // disposable. A monster that later acquires a real player item will
@@ -3077,12 +3475,10 @@ bool housing_remove_monster(const coord_def &pos)
 
     // The targeter is advisory. Keep the public mutation boundary just as
     // strict as monster placement so replayed/scripted targets cannot remove
-    // an actor outside the visible editor radius.
-    if (!map_bounds(pos) || !in_bounds(pos)
-        || (pos - you.pos()).rdist() > LOS_MAX_RANGE
-        || !you.see_cell_no_trans(pos))
+    // an actor outside the editable map.
+    if (!map_bounds(pos) || !in_bounds(pos))
     {
-        mpr("That square is outside the Housing editor's reach.");
+        mpr("That square is outside the editable Housing map.");
         return false;
     }
 
@@ -3125,8 +3521,8 @@ bool housing_remove_monster(const coord_def &pos)
     monster_cleanup(placed, true);
 
     StashTrack.update_stash(pos);
-    if (you.see_cell(pos))
-        view_update_at(pos);
+    show_update_at(pos);
+    redraw_view_at(pos);
     mprf("%s is removed from the Housing map.", removed_name.c_str());
     return true;
 }
@@ -4692,6 +5088,7 @@ static bool _housing_monster_can_be_published(const monster &mons)
         && housing_monster_type_allowed(mons.type)
         && testbits(mons.flags, MF_NO_REWARD)
         && _housing_created_monster(mons)
+        && _housing_monster_activity_policy_valid(mons)
         && mons.props.exists(NEVER_CORPSE_KEY);
 }
 
@@ -4869,6 +5266,18 @@ housing_publish_validation housing_validate_current_map()
         if (mons.alive())
         {
             ++housing_monsters;
+            if (_housing_created_monster(mons)
+                && !_housing_monster_activity_policy_valid(mons))
+            {
+                const coord_def pos = mons.pos();
+                return _housing_publish_problem_at(
+                    housing_publish_problem_type::unsafe_monster, pos,
+                    make_stringf(
+                        "Housing publish rejected: damaged owner/visitor "
+                        "activity settings on the monster at (%d,%d). "
+                        "Remove it and create it again.", pos.x, pos.y),
+                    "monster activity settings");
+            }
             if (!_housing_monster_can_be_published(mons))
             {
                 const bool valid_type = mons.type > MONS_PROGRAM_BUG

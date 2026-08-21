@@ -49,8 +49,9 @@ namespace
 class housing_terrain_brush_behaviour : public targeting_behaviour
 {
 public:
-    housing_terrain_brush_behaviour(int &size, dungeon_feature_type feat)
-        : _size(size), _feat(feat)
+    housing_terrain_brush_behaviour(int &size, dungeon_feature_type feat,
+                                    bool clearing)
+        : _size(size), _feat(feat), _clearing(clearing)
     {
     }
 
@@ -89,31 +90,43 @@ public:
 
     void update_top_prompt(string *top_prompt) override
     {
-        *top_prompt = make_stringf(
-            "Building '<w>%s</w>' with a <w>%dx%d</w> brush.\n"
-            "[<w>+/-</w>] resize, [<w>Space/Enter/.</w>] place and "
-            "continue, [<w>Esc</w>] finish.",
-            dungeon_feature_name(_feat), _size, _size);
+        if (_clearing)
+        {
+            *top_prompt = make_stringf(
+                "Clearing Housing terrain with a <w>%dx%d</w> brush; "
+                "ground items will be destroyed.\n"
+                "[<w>+/-</w>] resize, [<w>Space/Enter/.</w>] clear and "
+                "continue, [<w>Esc</w>] finish.",
+                _size, _size);
+        }
+        else
+        {
+            *top_prompt = make_stringf(
+                "Building '<w>%s</w>' with a <w>%dx%d</w> brush.\n"
+                "[<w>+/-</w>] resize, [<w>Space/Enter/.</w>] place and "
+                "continue, [<w>Esc</w>] finish.",
+                dungeon_feature_name(_feat), _size, _size);
+        }
     }
 
 private:
     int &_size;
     dungeon_feature_type _feat;
+    bool _clearing;
     bool _need_redraw = false;
 };
 
 static bool _housing_brush_cell_is_editable(const coord_def &pos)
 {
     return map_bounds(pos) && in_bounds(pos)
-           && grid_distance(you.pos(), pos) <= LOS_MAX_RANGE
-           && you.see_cell_no_trans(pos)
            && housing_can_edit_ensured(pos);
 }
 
 class housing_terrain_brush_targeter : public targeter
 {
 public:
-    explicit housing_terrain_brush_targeter(const int &size) : _size(size)
+    housing_terrain_brush_targeter(const int &size, bool clearing)
+        : _size(size), _clearing(clearing)
     {
         agent = &you;
         origin = you.pos();
@@ -121,17 +134,16 @@ public:
 
     bool valid_aim(coord_def pos) override
     {
-        if (!map_bounds(pos) || !in_bounds(pos)
-            || grid_distance(you.pos(), pos) > LOS_MAX_RANGE)
+        if (!map_bounds(pos) || !in_bounds(pos))
         {
-            why_not = "That square is outside the Housing editor's reach.";
+            why_not = "That square is outside the editable Housing map.";
             return false;
         }
-        if (!you.see_cell_no_trans(pos))
-        {
-            why_not = "You cannot reach that square through opaque terrain.";
-            return false;
-        }
+        return true;
+    }
+
+    bool can_affect_unseen() override
+    {
         return true;
     }
 
@@ -159,11 +171,14 @@ public:
         {
             return AFF_NO;
         }
+        if (_clearing)
+            return map_bounds(pos) && in_bounds(pos) ? AFF_YES : AFF_BAD;
         return _housing_brush_cell_is_editable(pos) ? AFF_YES : AFF_BAD;
     }
 
 private:
     const int &_size;
+    bool _clearing;
 };
 } // namespace
 
@@ -217,7 +232,7 @@ housing_terrain_brush_result wizard_apply_housing_terrain_brush(
     {
         if (_housing_brush_cell_is_editable(pos))
             continue;
-        mprf("The %dx%d Housing brush includes a protected or unreachable "
+        mprf("The %dx%d Housing brush includes a protected "
              "square at (%d,%d); nothing was built.",
              size, size, pos.x, pos.y);
         return housing_terrain_brush_result::rejected;
@@ -237,7 +252,7 @@ housing_terrain_brush_result wizard_apply_housing_terrain_brush(
     }
 
     // Every cell was validated before the first mutation. Keep the stamp
-    // exact: a protected fixture, actor, item, or unreachable edge can never
+    // exact: a protected fixture, actor, item, or map edge can never
     // leave a partially painted rectangle.
     for (const coord_def &pos : changed_cells)
     {
@@ -246,12 +261,12 @@ housing_terrain_brush_result wizard_apply_housing_terrain_brush(
         env.grid_colours(pos) = 0;
         dungeon_terrain_changed(pos, feat, false, false, true);
         tile_init_flavour(pos);
-        if (you.see_cell(pos))
-        {
-            show_update_at(pos);
-            StashTrack.update_stash(pos);
-            redraw_view_at(pos);
-        }
+        // Owners may edit remembered cells beyond current LOS. Refresh known
+        // map data and WebTiles immediately; show_update_at remains a no-op
+        // for a genuinely unknown square.
+        show_update_at(pos);
+        StashTrack.update_stash(pos);
+        redraw_view_at(pos);
     }
     return housing_terrain_brush_result::changed;
 }
@@ -624,12 +639,14 @@ bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic,
 
     const bool targeting_mode = target.needs_targeting();
     const bool housing_build = housing_edit && !housing_clear;
-    const bool interactive_brush = targeting_mode && housing_build;
+    const bool interactive_brush = targeting_mode && housing_edit;
     if (housing_build && housing_is_owner())
         housing_ensure_level();
     int housing_brush_size = HOUSING_TERRAIN_BRUSH_MIN_SIZE;
-    housing_terrain_brush_behaviour brush_behaviour(housing_brush_size, feat);
-    housing_terrain_brush_targeter brush_targeter(housing_brush_size);
+    housing_terrain_brush_behaviour brush_behaviour(
+        housing_brush_size, feat, housing_clear);
+    housing_terrain_brush_targeter brush_targeter(
+        housing_brush_size, housing_clear);
 
     bool changed = false;
     do
@@ -639,8 +656,8 @@ bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic,
             // TODO: should this just toggle xray vision on?
             viewwindow(true); // make sure los is up to date
             direction_chooser_args args;
-            args.range = interactive_brush || !you.wizard_vision
-                             ? LOS_MAX_RANGE : -1;
+            args.range = interactive_brush ? -1
+                         : !you.wizard_vision ? LOS_MAX_RANGE : -1;
             args.restricts = DIR_TARGET;
             args.mode = TARG_NON_ACTOR;
             args.needs_path = false;
@@ -690,13 +707,16 @@ bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic,
 
         if (housing_clear)
         {
-            if (!housing_clear_terrain(pos))
-            {
-                if (!targeting_mode)
-                    return false;
-                continue;
-            }
-            changed = true;
+            const housing_clear_brush_result result =
+                housing_clear_terrain_brush(
+                    wizard_housing_brush_cells(
+                        pos, interactive_brush ? housing_brush_size
+                                               : HOUSING_TERRAIN_BRUSH_MIN_SIZE));
+            if (!interactive_brush)
+                return result == housing_clear_brush_result::changed;
+            if (result == housing_clear_brush_result::changed)
+                changed = true;
+            continue;
         }
         else if (housing_edit)
         {
@@ -713,12 +733,7 @@ bool wizard_create_feature(dist &target, dungeon_feature_type feat, bool mimic,
 
         bool done = false;
         bool success = false;
-        if (housing_clear)
-        {
-            // housing_clear_terrain() has already performed the authenticated
-            // feature-specific mutation above.
-        }
-        else if (feat == DNGN_ENTER_SHOP)
+        if (feat == DNGN_ENTER_SHOP)
         {
             success = debug_make_shop(pos);
             done = true;

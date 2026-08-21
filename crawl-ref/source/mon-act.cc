@@ -2837,12 +2837,11 @@ void handle_monsters(bool with_noise)
 {
     for (monster_iterator mi; mi; ++mi)
     {
-        // Housing monsters are editable map contents for their owner. Freeze
-        // them completely (including their accumulated action energy) so a
-        // translucent display barrier cannot permit smite-targeted or other
-        // full-LOS attacks. Visitors load the same monsters without this
-        // owner-only guard and they act normally after the barriers open.
-        if (housing_monster_is_owner_inert(**mi))
+        // Housing monsters carry separate owner and visitor activity policy.
+        // Freeze inactive actors completely (including accumulated action
+        // energy) so movement, attacks, spells, and special abilities all
+        // obey the same per-role setting.
+        if (housing_monster_is_inert(**mi))
         {
             mi->drain_action_energy();
             fire_final_effects();
@@ -2870,6 +2869,16 @@ void handle_monsters(bool with_noise)
 
         if (invalid_monster(mon) || !mon->alive() || !mon->has_action_energy())
             continue;
+        // Some effects enqueue a monster directly after the initial scan.
+        // Recheck the role policy here so a frozen Housing monster (or an
+        // attached tentacle inheriting its head's policy) cannot act through
+        // that alternate scheduler entry point.
+        if (housing_monster_is_inert(*mon))
+        {
+            mon->drain_action_energy();
+            fire_final_effects();
+            continue;
+        }
 
         _update_monster_attitude(mon);
 
@@ -4312,6 +4321,8 @@ void seen_monsters_react()
 
     for (monster_near_iterator mi(you.pos()); mi; ++mi)
     {
+        if (housing_monster_is_inert(**mi))
+            continue;
         if ((mi->asleep() || mi->behaviour == BEH_WANDER)
             && check_awaken(*mi, stealth))
         {

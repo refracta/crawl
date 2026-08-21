@@ -1170,20 +1170,29 @@ Build housing terrain ability
 Places the terrain selected with Set housing terrain to build. + and - resize
 the square brush from 1x1 through 8x8. Space, Enter, and . place the entire
 brush while keeping the targeting cursor open; press Esc when finished. If any
-square in the brush is protected or unreachable, nothing is changed.
+square in the brush is protected or outside the map, nothing is changed. The
+Housing editor may target squares beyond normal sight and through opaque
+terrain.
 %%%%
 Clear housing terrain to floor ability
 
-Clears Housing fixtures and terrain from the selected square and destroys all
-items on it. Space, Enter, and . clear squares while keeping the targeting
-cursor open; press Esc when finished.
+Clears Housing fixtures and terrain and destroys all items in the selected
+square brush. + and - resize the brush from 1x1 through 8x8. Space, Enter, and .
+clear the entire brush while keeping the targeting cursor open; press Esc when
+finished. The Housing editor may target squares beyond normal sight and through
+opaque terrain. If any square cannot be cleared safely, nothing in the brush is
+changed; use a 1x1 brush to repair a specifically reported damaged fixture.
 %%%%
 Create a housing monster ability
 
-Prompts for a monster type once, then places copies at selected squares. Space,
-Enter, and . place monsters while keeping the targeting cursor open; press Esc
-when finished. Monsters remain inert for their owner and act normally for
-visitors.
+Prompts for a monster type, then opens a menu choosing separately whether that
+placement batch can act for the owner and for visitors. Monsters allowed to act
+can move, attack, cast spells, and use special abilities; monsters set to No do
+not receive AI turns, though existing environmental effects can still affect
+them. The default preserves the original behaviour: No for the owner and Yes
+for visitors. Space, Enter, and . place copies while keeping the targeting
+cursor open; press Esc when finished. Acting monsters may temporarily make a
+map unpublishable by creating clouds or summoned creatures.
 %%%%
 Remove a housing monster ability
 

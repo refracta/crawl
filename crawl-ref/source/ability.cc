@@ -762,13 +762,13 @@ static vector<ability_def> &_get_ability_list()
         { ABIL_HOUSING_ACQUIRE, "Acquire a housing item",
             0, 0, 0, -1, {}, abflag::instant },
         { ABIL_HOUSING_BUILD_TERRAIN, "Build housing terrain",
-            0, 0, 0, LOS_MAX_RANGE, {}, abflag::instant },
+            0, 0, 0, -1, {}, abflag::instant },
         { ABIL_HOUSING_SET_TERRAIN, "Set housing terrain to build",
             0, 0, 0, -1, {}, abflag::instant },
         { ABIL_HOUSING_CLEAR_TERRAIN, "Clear housing terrain to floor",
-            0, 0, 0, LOS_MAX_RANGE, {}, abflag::instant },
+            0, 0, 0, -1, {}, abflag::instant },
         { ABIL_HOUSING_CREATE_PORTAL, "Create a housing portal",
-            0, 0, 0, LOS_MAX_RANGE, {},
+            0, 0, 0, -1, {},
             abflag::instant | abflag::target | abflag::not_self },
         { ABIL_HOUSING_RETURN_HOME, "Return home",
             0, 0, 0, -1, {}, abflag::instant },
@@ -781,19 +781,19 @@ static vector<ability_def> &_get_ability_list()
         { ABIL_HOUSING_TRAVEL_TO_MAP, "Travel to a housing map",
             0, 0, 0, -1, {}, abflag::instant },
         { ABIL_HOUSING_TOGGLE_VISITOR_WALL, "Toggle an owner-only barrier",
-            0, 0, 0, LOS_MAX_RANGE, {},
+            0, 0, 0, -1, {},
             abflag::instant | abflag::target | abflag::not_self },
         { ABIL_HOUSING_MANAGE_SPAWNS, "Toggle a housing spawn point",
-            0, 0, 0, LOS_MAX_RANGE, {},
+            0, 0, 0, -1, {},
             abflag::instant | abflag::target | abflag::not_self },
         { ABIL_HOUSING_CREATE_VISITOR_STRIP,
             "Place a visitor inventory strip",
-            0, 0, 0, LOS_MAX_RANGE, {},
+            0, 0, 0, -1, {},
             abflag::instant | abflag::target | abflag::not_self },
         { ABIL_HOUSING_SHOW_COORDINATES, "Show Housing coordinates",
             0, 0, 0, -1, {}, abflag::instant },
         { ABIL_HOUSING_REMOVE_MONSTER, "Remove a housing monster",
-            0, 0, 0, LOS_MAX_RANGE, {},
+            0, 0, 0, -1, {},
             abflag::instant | abflag::target },
 #ifdef WIZARD
         { ABIL_WIZ_BUILD_TERRAIN, "Build terrain",
@@ -2737,21 +2737,48 @@ static vector<coord_def> _find_carnage_servant_targets()
     return targs;
 }
 
+// Housing is a map editor, not a combat action. Owners may work on any cell
+// in the current map viewport even when ordinary LOS is blocked; each domain
+// mutator still performs its own actor, item, fixture, terrain, and ownership
+// checks before changing state.
+class housing_point_editor_targeter : public targeter
+{
+public:
+    housing_point_editor_targeter()
+    {
+        agent = &you;
+        origin = aim = you.pos();
+    }
+
+    bool valid_aim(coord_def pos) override
+    {
+        if (!map_bounds(pos) || !in_bounds(pos))
+        {
+            why_not = "That square is outside the editable Housing map.";
+            return false;
+        }
+        return true;
+    }
+
+    bool can_affect_unseen() override { return true; }
+    bool can_affect_walls() override { return true; }
+    bool harmful_to_player() override { return false; }
+    aff_type is_affected(coord_def pos) override
+    {
+        return valid_aim(aim) && pos == aim ? AFF_YES : AFF_NO;
+    }
+};
+
 unique_ptr<targeter> find_ability_targeter(ability_type ability)
 {
     switch (ability)
     {
     case ABIL_HOUSING_TOGGLE_VISITOR_WALL:
     case ABIL_HOUSING_CREATE_PORTAL:
-        return make_unique<targeter_smite>(&you, ability_range(ability),
-                                            0, 0, true, true, false);
     case ABIL_HOUSING_MANAGE_SPAWNS:
     case ABIL_HOUSING_CREATE_VISITOR_STRIP:
-        return make_unique<targeter_smite>(&you, ability_range(ability),
-                                            0, 0, true, false, false);
     case ABIL_HOUSING_REMOVE_MONSTER:
-        return make_unique<targeter_smite>(&you, ability_range(ability),
-                                            0, 0, true, false, true);
+        return make_unique<housing_point_editor_targeter>();
 
     // Limited radius:
     case ABIL_ZIN_SANCTUARY:
