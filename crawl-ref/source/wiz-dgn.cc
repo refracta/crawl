@@ -407,71 +407,170 @@ void wizard_interlevel_travel()
     _wizard_go_to_level(pos);
 }
 
-dungeon_feature_type wizard_select_feature(bool mimic, bool allow_fprop)
+bool wizard_housing_feature_selectable(dungeon_feature_type feat)
 {
-    char specs[256];
-    // TODO: this sub-ui is very annoying to use
-    if (mimic)
-        mprf(MSGCH_PROMPT, "Create what kind of feature mimic? ");
-    else
-        mprf(MSGCH_PROMPT, "Create which feature? ");
+    if (!housing_feature_allowed(feat))
+        return false;
 
-    if (cancellable_get_line_autohist(specs, sizeof(specs)) || specs[0] == 0)
-    {
-        canned_msg(MSG_OK);
-        return DNGN_UNSEEN;
-    }
+    const char * const name = dungeon_feature_name(feat);
+    return name && dungeon_feature_by_name(name) == feat;
+}
 
-    dungeon_feature_type feat = DNGN_UNSEEN;
+vector<string> wizard_feature_matches(const string &name, bool housing_only)
+{
+    const string normalized = replace_all(
+        lowercase_string(trimmed_string(name)), " ", "_");
+    vector<string> matches = dungeon_feature_matches(normalized);
+    if (!housing_only)
+        return matches;
 
-    if (int feat_num = atoi(specs))
-        feat = static_cast<dungeon_feature_type>(feat_num);
-    else
-    {
-        string name = lowercase_string(specs);
-        name = replace_all(name, " ", "_");
-        feat = dungeon_feature_by_name(name);
-        if (feat == DNGN_UNSEEN) // no exact match
+    matches.erase(std::remove_if(matches.begin(), matches.end(),
+        [](const string &candidate)
         {
-            vector<string> matches = dungeon_feature_matches(name);
+            const dungeon_feature_type feat =
+                dungeon_feature_by_name(candidate);
+            return feat == DNGN_UNSEEN
+                || candidate != dungeon_feature_name(feat)
+                || !wizard_housing_feature_selectable(feat);
+        }), matches.end());
+    return matches;
+}
 
-            if (matches.empty())
+static bool _looks_like_feature_entrance(const string &name)
+{
+    return starts_with(name, "enter_") || starts_with(name, "exit_");
+}
+
+static void _explain_unavailable_housing_feature(const string &name)
+{
+    if (_looks_like_feature_entrance(name))
+    {
+        mpr("Native dungeon entrances and exits cannot be built in Housing. "
+            "Use Create a Housing portal/passage for travel, or build "
+            "stone_arch or expired_portal for decoration.");
+    }
+    else
+        mpr("That terrain is not available in Housing.");
+}
+
+static dungeon_feature_type _wizard_select_feature(bool mimic,
+                                                   bool allow_fprop,
+                                                   bool housing_only)
+{
+    dungeon_feature_type feat = DNGN_UNSEEN;
+    while (feat == DNGN_UNSEEN)
+    {
+        char specs[256];
+        if (mimic)
+            mprf(MSGCH_PROMPT, "Create what kind of feature mimic? ");
+        else if (housing_only)
+            mprf(MSGCH_PROMPT, "Choose which Housing terrain? ");
+        else
+            mprf(MSGCH_PROMPT, "Create which feature? ");
+
+        if (cancellable_get_line_autohist(specs, sizeof(specs))
+            || specs[0] == 0)
+        {
+            canned_msg(MSG_OK);
+            return DNGN_UNSEEN;
+        }
+
+        string name;
+        if (int feat_num = atoi(specs))
+            feat = static_cast<dungeon_feature_type>(feat_num);
+        else
+        {
+            name = lowercase_string(trimmed_string(specs));
+            if (name.empty())
             {
-                const feature_property_type fprop(str_to_fprop(name));
-                // TODO: fix so that the ability can place fprops
-                if (fprop != FPROP_NONE && allow_fprop)
+                canned_msg(MSG_OK);
+                return DNGN_UNSEEN;
+            }
+            name = replace_all(name, " ", "_");
+            feat = dungeon_feature_by_name(name);
+            if (housing_only && feat != DNGN_UNSEEN)
+            {
+                const vector<string> allowed_matches =
+                    wizard_feature_matches(name, true);
+                if (std::find(allowed_matches.begin(), allowed_matches.end(),
+                              name) == allowed_matches.end())
                 {
-                    env.pgrid(you.pos()) |= fprop;
-                    mprf("Set fprops \"%s\" at (%d,%d)",
-                         name.c_str(), you.pos().x, you.pos().y);
+                    feat = DNGN_UNSEEN;
+                }
+            }
+            if (feat == DNGN_UNSEEN) // no exact match
+            {
+                const vector<string> all_matches =
+                    dungeon_feature_matches(name);
+                const vector<string> matches =
+                    wizard_feature_matches(name, housing_only);
+
+                if (matches.empty())
+                {
+                    if (housing_only && !all_matches.empty())
+                    {
+                        const bool entrance = std::any_of(
+                            all_matches.begin(), all_matches.end(),
+                            _looks_like_feature_entrance);
+                        if (entrance)
+                            _explain_unavailable_housing_feature("enter_");
+                        else
+                            mprf("No available Housing terrain matches '%s'.",
+                                 name.c_str());
+                        continue;
+                    }
+
+                    if (housing_only)
+                    {
+                        mprf(MSGCH_DIAGNOSTICS,
+                             "No available Housing terrain matching '%s'",
+                             name.c_str());
+                        continue;
+                    }
+
+                    const feature_property_type fprop(str_to_fprop(name));
+                    // TODO: fix so that the ability can place fprops
+                    if (fprop != FPROP_NONE && allow_fprop)
+                    {
+                        env.pgrid(you.pos()) |= fprop;
+                        mprf("Set fprops \"%s\" at (%d,%d)",
+                             name.c_str(), you.pos().x, you.pos().y);
+                    }
+                    else
+                    {
+                        mprf(MSGCH_DIAGNOSTICS,
+                             "No features matching '%s'", name.c_str());
+                    }
+                    return DNGN_UNSEEN;
+                }
+
+                // Only one possible match, use that.
+                if (matches.size() == 1)
+                {
+                    name = matches[0];
+                    feat = dungeon_feature_by_name(name);
                 }
                 else
                 {
-                    mprf(MSGCH_DIAGNOSTICS, "No features matching '%s'",
-                         name.c_str());
+                    string prefix = "No exact match for feature '" + name
+                        + (housing_only ? "', available Housing matches are: "
+                                        : "', possible matches are: ");
+                    mpr_comma_separated_list(prefix, matches, " and ", ", ",
+                                             MSGCH_DIAGNOSTICS);
+                    mprf(MSGCH_PROMPT,
+                         "Enter one exact name from the list (spaces or _ "
+                         "are both accepted).");
+                    continue;
                 }
-                return DNGN_UNSEEN;
             }
+        }
 
-            // Only one possible match, use that.
-            if (matches.size() == 1)
-            {
-                name = matches[0];
-                feat = dungeon_feature_by_name(name);
-            }
-            // Multiple matches, list them to wizard
-            else
-            {
-                string prefix = "No exact match for feature '" +
-                                name +  "', possible matches are: ";
-
-                // Use mpr_comma_separated_list() because the list
-                // might be *LONG*.
-                mpr_comma_separated_list(prefix, matches, " and ", ", ",
-                                         MSGCH_DIAGNOSTICS);
-                // TODO: no recursion
-                feat = wizard_select_feature(mimic);
-            }
+        if (housing_only && !wizard_housing_feature_selectable(feat))
+        {
+            _explain_unavailable_housing_feature(
+                name.empty() && is_valid_feature_type(feat)
+                    ? dungeon_feature_name(feat) : name);
+            feat = DNGN_UNSEEN;
         }
     }
 
@@ -484,6 +583,16 @@ dungeon_feature_type wizard_select_feature(bool mimic, bool allow_fprop)
     if (feat == DNGN_UNSEEN)
         canned_msg(MSG_OK);
     return feat;
+}
+
+dungeon_feature_type wizard_select_feature(bool mimic, bool allow_fprop)
+{
+    return _wizard_select_feature(mimic, allow_fprop, false);
+}
+
+dungeon_feature_type wizard_select_housing_feature()
+{
+    return _wizard_select_feature(false, false, true);
 }
 
 bool wizard_create_feature(const coord_def& pos, dungeon_feature_type feat, bool mimic)

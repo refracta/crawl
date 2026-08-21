@@ -2363,6 +2363,8 @@ bool housing_feature_allowed(dungeon_feature_type feat)
     case DNGN_EXPIRED_PORTAL:
     case DNGN_TREE:
     case DNGN_GRANITE_STATUE:
+    case DNGN_METAL_STATUE:
+    case DNGN_ZOT_STATUE:
     case DNGN_SHALLOW_WATER:
     case DNGN_DEEP_WATER:
     case DNGN_LAVA:
@@ -2382,8 +2384,6 @@ bool housing_feature_allowed(dungeon_feature_type feat)
     case DNGN_PETRIFIED_TREE:
     case DNGN_FRIGID_WALL:
     case DNGN_ENDLESS_SALT:
-    case DNGN_METAL_STATUE:
-    case DNGN_ZOT_STATUE:
     case DNGN_MUD:
     case DNGN_TOXIC_BOG:
     case DNGN_BINDING_SIGIL:
@@ -2397,6 +2397,15 @@ bool housing_feature_allowed(dungeon_feature_type feat)
     default:
         return false;
     }
+}
+
+bool housing_blocks_native_transition(dungeon_feature_type feat)
+{
+    if (!crawl_state.game_is_housing() || !is_valid_feature_type(feat))
+        return false;
+
+    return feat_is_travelable_stair(feat) || feat_is_gate(feat)
+           || feat == DNGN_EXIT_DUNGEON;
 }
 
 dungeon_feature_type housing_last_feature()

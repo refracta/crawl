@@ -110,6 +110,11 @@ bool housing_can_edit(const coord_def &pos);
 // housing_ensure_level() once before using it for a batch or live preview.
 bool housing_can_edit_ensured(const coord_def &pos);
 bool housing_feature_allowed(dungeon_feature_type feat);
+// Native Crawl stairs and branch/portal entrances have no valid destination
+// in a Housing level. This guard keeps legacy or malformed terrain from
+// leaving the Housing package; authenticated Housing portals are handled by
+// housing_take_portal() before this predicate is consulted.
+bool housing_blocks_native_transition(dungeon_feature_type feat);
 dungeon_feature_type housing_last_feature();
 void housing_set_last_feature(dungeon_feature_type feat);
 bool housing_valid_map_target(const string &target);

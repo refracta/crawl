@@ -16,6 +16,8 @@
 #include "item-status-flag-type.h"
 #include "items.h"
 #include "jobs.h"
+#include "los.h"
+#include "losglobal.h"
 #include "losparam.h"
 #include "mapmark.h"
 #include "menu.h"
@@ -31,6 +33,7 @@
 #include "package.h"
 #include "player.h"
 #include "state.h"
+#include "stairs.h"
 #include "status.h"
 #include "tags.h"
 #include "target.h"
@@ -39,10 +42,12 @@
 #include "unwind.h"
 #include "terrain.h"
 #include "tile-env.h"
+#include "tilepick.h"
 #include "viewgeom.h"
 #include "wizard.h"
 #include "wiz-dgn.h"
 #include "zot.h"
+#include "rltiles/tiledef-dngn.h"
 
 extern map<level_id, string> level_uniques;
 extern set<pair<string, level_id>> auto_unique_annotations;
@@ -276,6 +281,9 @@ TEST_CASE("Housing terrain permits decorative hazards and altars safely",
     REQUIRE(housing_feature_allowed(DNGN_GRATE));
     REQUIRE(housing_feature_allowed(DNGN_STONE_ARCH));
     REQUIRE(housing_feature_allowed(DNGN_EXPIRED_PORTAL));
+    REQUIRE(housing_feature_allowed(DNGN_GRANITE_STATUE));
+    REQUIRE(housing_feature_allowed(DNGN_METAL_STATUE));
+    REQUIRE(housing_feature_allowed(DNGN_ZOT_STATUE));
 
     // A runelight is reserved for an authenticated Housing spawn fixture;
     // generic terrain editing must not be able to forge one.
@@ -285,6 +293,101 @@ TEST_CASE("Housing terrain permits decorative hazards and altars safely",
     REQUIRE_FALSE(housing_feature_allowed(DNGN_ENTER_LAIR));
     REQUIRE_FALSE(housing_feature_allowed(DNGN_ORB_DAIS));
     REQUIRE_FALSE(housing_feature_allowed(DNGN_MOULD_PATCH));
+}
+
+TEST_CASE("Housing terrain search advertises only usable features",
+          "[single-file]")
+{
+    init_show_table();
+    vector<string> statues = wizard_feature_matches("statue", true);
+    std::sort(statues.begin(), statues.end());
+    REQUIRE(statues
+            == vector<string>{"granite_statue", "metal_statue",
+                              "zot_statue"});
+
+    const vector<string> all_entrances = dungeon_feature_matches("enter_");
+    REQUIRE_FALSE(all_entrances.empty());
+    REQUIRE(wizard_feature_matches("enter_", true).empty());
+    for (const string &name : all_entrances)
+    {
+        const dungeon_feature_type feat = dungeon_feature_by_name(name);
+        REQUIRE(feat != DNGN_UNSEEN);
+        REQUIRE_FALSE(housing_feature_allowed(feat));
+    }
+
+#if TAG_MAJOR_VERSION == 34
+    // Disabled gods are parsed as floor by the legacy feature lookup. They
+    // must not leak into the Housing selector as an apparent safe floor.
+    REQUIRE_FALSE(dungeon_feature_matches("altar_pakellas").empty());
+    REQUIRE(wizard_feature_matches("altar_pakellas", true).empty());
+    REQUIRE_FALSE(wizard_housing_feature_selectable(DNGN_ALTAR_PAKELLAS));
+#endif
+    REQUIRE(wizard_housing_feature_selectable(DNGN_METAL_STATUE));
+    REQUIRE(wizard_housing_feature_selectable(DNGN_ZOT_STATUE));
+}
+
+TEST_CASE("Housing native level transitions fail closed", "[single-file]")
+{
+    unwind_var<game_type> saved_game_type(crawl_state.type,
+                                          GAME_TYPE_HOUSING);
+
+    REQUIRE(housing_blocks_native_transition(DNGN_ENTER_LAIR));
+    REQUIRE(housing_blocks_native_transition(DNGN_ENTER_PANDEMONIUM));
+    REQUIRE(housing_blocks_native_transition(DNGN_ENTER_WIZLAB));
+    REQUIRE(housing_blocks_native_transition(DNGN_STONE_STAIRS_DOWN_I));
+    REQUIRE(housing_blocks_native_transition(DNGN_EXIT_DUNGEON));
+    REQUIRE_FALSE(housing_blocks_native_transition(DNGN_ENTER_SHOP));
+    REQUIRE(housing_blocks_native_transition(DNGN_ENTER_PORTAL_VAULT));
+
+    crawl_state.type = GAME_TYPE_NORMAL;
+    REQUIRE_FALSE(housing_blocks_native_transition(DNGN_ENTER_LAIR));
+}
+
+TEST_CASE("Housing Zot statues are visible without discovery side effects",
+          "[single-file]")
+{
+    unwind_var<game_type> saved_game_type(crawl_state.type,
+                                          GAME_TYPE_HOUSING);
+    unwind_var<branch_type> saved_branch(you.where_are_you, BRANCH_DUNGEON);
+    unwind_var<bool> saved_known(you.zot_orb_monster_known, false);
+    unwind_var<monster_type> saved_orb(you.zot_orb_monster,
+                                       MONS_ORB_OF_FIRE);
+    const bool had_milestone = you.props.exists("last_milestone");
+    const bool had_type = you.props.exists("last_milestone_type");
+    const bool had_turn = you.props.exists("last_milestone_turn");
+    const CrawlStoreValue old_milestone = had_milestone
+        ? you.props["last_milestone"] : CrawlStoreValue();
+    const CrawlStoreValue old_type = had_type
+        ? you.props["last_milestone_type"] : CrawlStoreValue();
+    const CrawlStoreValue old_turn = had_turn
+        ? you.props["last_milestone_turn"] : CrawlStoreValue();
+    unwinder restore_milestone = [=]() {
+        you.props.erase("last_milestone");
+        you.props.erase("last_milestone_type");
+        you.props.erase("last_milestone_turn");
+        if (had_milestone)
+            you.props["last_milestone"] = old_milestone;
+        if (had_type)
+            you.props["last_milestone_type"] = old_type;
+        if (had_turn)
+            you.props["last_milestone_turn"] = old_turn;
+    };
+
+    you.props["last_milestone"] = "housing statue sentinel";
+    you.props["last_milestone_type"] = "housing.test";
+    you.props["last_milestone_turn"] = you.num_turns - 1;
+    seen_notable_thing(DNGN_ZOT_STATUE, you.pos());
+    REQUIRE_FALSE(you.zot_orb_monster_known);
+    REQUIRE(you.props["last_milestone"].get_string()
+            == "housing statue sentinel");
+    REQUIRE(you.props["last_milestone_type"].get_string()
+            == "housing.test");
+    REQUIRE(tileidx_feature_base(DNGN_ZOT_STATUE)
+            == TILE_DNGN_ZOT_FIRE_STATUE);
+
+    crawl_state.type = GAME_TYPE_NORMAL;
+    REQUIRE(tileidx_feature_base(DNGN_ZOT_STATUE)
+            == TILE_DNGN_PETRIFIED_TREE);
 }
 
 TEST_CASE("Housing monster policy rejects only unsafe actor payloads",
@@ -935,6 +1038,10 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         env.grid_colours(template_spawn) = old_spawn_colour;
         env.grid_colours(ambiguous_spawn) = old_ambiguous_colour;
         env.grid_colours(third_passage) = old_third_colour;
+        invalidate_los_around(old_start);
+        invalidate_los_around(template_spawn);
+        invalidate_los_around(ambiguous_spawn);
+        invalidate_los_around(third_passage);
     };
 
     env.properties.erase("housing_spawn_points");
@@ -992,6 +1099,71 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE_FALSE(wizard_create_feature(target, DNGN_STONE_WALL, false,
                                             true, false));
         REQUIRE(env.grid(ambiguous_spawn) == DNGN_STONE_WALL);
+    }
+
+    SECTION("all statue variants build publish and clear")
+    {
+        housing_ensure_level(false);
+        const unsigned int saved_map_id =
+            env.level_map_ids(ambiguous_spawn);
+        unwinder restore_map_id = [saved_map_id, ambiguous_spawn]() {
+            env.level_map_ids(ambiguous_spawn) = saved_map_id;
+        };
+        env.level_map_ids(ambiguous_spawn) = INVALID_MAP_INDEX;
+        unwind_var<bool> saved_known(you.zot_orb_monster_known, false);
+
+        const dungeon_feature_type statues[] =
+        {
+            DNGN_GRANITE_STATUE,
+            DNGN_METAL_STATUE,
+            DNGN_ZOT_STATUE,
+        };
+        for (dungeon_feature_type statue : statues)
+        {
+            REQUIRE(wizard_apply_housing_terrain_brush(
+                        ambiguous_spawn, statue, 1)
+                    == housing_terrain_brush_result::changed);
+            REQUIRE(env.grid(ambiguous_spawn) == statue);
+            REQUIRE(housing_validate_current_map().valid());
+            REQUIRE(housing_clear_terrain(ambiguous_spawn));
+            REQUIRE(env.grid(ambiguous_spawn) == DNGN_FLOOR);
+        }
+        REQUIRE_FALSE(you.zot_orb_monster_known);
+    }
+
+    SECTION("native and malformed entrances cannot leave Housing")
+    {
+        housing_ensure_level(false);
+        unwind_var<branch_type> saved_branch(you.where_are_you,
+                                              BRANCH_DUNGEON);
+        unwind_var<int> saved_depth(you.depth, 1);
+        unwind_var<int> saved_dungeon_depth(brdepth[BRANCH_DUNGEON], 1);
+        const level_id original_level = level_id::current();
+        const coord_def original_pos = you.pos();
+        auto require_unchanged = [&]() {
+            REQUIRE(level_id::current() == original_level);
+            REQUIRE(you.pos() == original_pos);
+        };
+
+        env.grid(old_start) = DNGN_ENTER_LAIR;
+        take_stairs();
+        require_unchanged();
+
+        env.grid(old_start) = DNGN_FLOOR;
+        take_stairs(DNGN_ENTER_LAIR);
+        require_unchanged();
+
+        // A forced portal-vault entrance must not bypass the Housing guard.
+        take_stairs(DNGN_ENTER_PORTAL_VAULT);
+        require_unchanged();
+
+        // Marker-free legacy portal terrain is handled as malformed instead
+        // of falling through to Crawl's native portal-vault loader.
+        env.grid(old_start) = DNGN_ENTER_PORTAL_VAULT;
+        REQUIRE(env.markers.get_markers_at(old_start).empty());
+        REQUIRE(housing_take_portal(old_start));
+        take_stairs();
+        require_unchanged();
     }
 
     SECTION("a marked cell rejects the entire Housing terrain brush")
@@ -1077,6 +1249,7 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
     {
         housing_ensure_level(false);
         env.grid(ambiguous_spawn) = DNGN_ROCK_WALL;
+        los_terrain_changed(ambiguous_spawn);
         REQUIRE_FALSE(you.see_cell_no_trans(third_passage));
 
         REQUIRE(wizard_apply_housing_terrain_brush(

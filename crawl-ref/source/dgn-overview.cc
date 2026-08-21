@@ -119,7 +119,9 @@ void seen_notable_thing(dungeon_feature_type which_thing, const coord_def& pos)
         _seen_shop(pos);
     else if (feat_is_gate(which_thing)) // overinclusive
         _seen_portal(which_thing, pos);
-    else if (which_thing == DNGN_ZOT_STATUE && !you.zot_orb_monster_known)
+    else if (which_thing == DNGN_ZOT_STATUE
+             && !crawl_state.game_is_housing()
+             && !you.zot_orb_monster_known)
     {
         const string monname = pluralise_monster(mons_type_name(you.zot_orb_monster, DESC_DBNAME)).c_str();
         mark_milestone("zotorb", make_stringf("will face %s", monname.c_str()));

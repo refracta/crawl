@@ -185,7 +185,7 @@ tileidx_t tileidx_feature_base(dungeon_feature_type feat)
     case DNGN_GRANITE_STATUE:
         return TILE_DNGN_GRANITE_STATUE;
     case DNGN_ZOT_STATUE:
-        if (you.zot_orb_monster_known)
+        if (you.zot_orb_monster_known || crawl_state.game_is_housing())
         {
             switch (you.zot_orb_monster)
             {
@@ -195,8 +195,7 @@ tileidx_t tileidx_feature_base(dungeon_feature_type feat)
                 default: break;
             }
         }
-        else
-            return TILE_DNGN_PETRIFIED_TREE;
+        return TILE_DNGN_PETRIFIED_TREE;
     case DNGN_LAVA:
         return TILE_DNGN_LAVA;
     case DNGN_LAVA_SEA:

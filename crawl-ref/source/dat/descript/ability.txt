@@ -1148,6 +1148,16 @@ position. The displayed x,y pair uses the same coordinate system as Housing
 publish validation errors, so you can move until it matches a reported invalid
 tile.
 %%%%
+Set housing terrain to build ability
+
+Chooses the terrain used by Build housing terrain. You may type all or part of
+a terrain name; if several available Housing terrains match, type one exact
+name from the displayed list. Spaces and underscores are both accepted.
+
+Native dungeon entrances and exits cannot be built in Housing. Use Create a
+housing portal for travel, or choose stone_arch or expired_portal for a
+decorative entrance.
+%%%%
 Build housing terrain ability
 
 Places the terrain selected with Set housing terrain to build. + and - resize

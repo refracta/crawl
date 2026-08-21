@@ -4388,7 +4388,7 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
     case ABIL_HOUSING_SET_TERRAIN:
 #ifdef WIZARD
     {
-        const auto feat = wizard_select_feature(false);
+        const auto feat = wizard_select_housing_feature();
         if (feat == DNGN_UNSEEN)
             return spret::abort;
         if (!housing_feature_allowed(feat))

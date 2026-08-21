@@ -36,7 +36,11 @@ std::vector<coord_def> wizard_housing_brush_cells(const coord_def &centre,
 housing_terrain_brush_result wizard_apply_housing_terrain_brush(
     const coord_def &centre, dungeon_feature_type feat, int size);
 
+std::vector<std::string> wizard_feature_matches(const std::string &name,
+                                                bool housing_only=false);
+bool wizard_housing_feature_selectable(dungeon_feature_type feat);
 dungeon_feature_type wizard_select_feature(bool mimic, bool allow_fprop=false);
+dungeon_feature_type wizard_select_housing_feature();
 bool wizard_create_feature(const coord_def& pos = you.pos(),
                                     dungeon_feature_type feat=DNGN_UNSEEN,
                                     bool mimic=false);

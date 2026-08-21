@@ -1182,6 +1182,17 @@ void take_stairs(dungeon_feature_type force_stair, bool going_up,
             return;
     }
 
+    // Housing has no native Crawl branch graph behind its persistent D:1
+    // level. Old or externally damaged maps may still contain a staircase or
+    // branch entrance, so fail closed instead of asking stair_destination()
+    // to load an invalid branch depth. Dedicated authenticated Housing
+    // portals returned above and shops keep their existing handling.
+    if (housing_blocks_native_transition(how))
+    {
+        mpr("That staircase or portal cannot be used in Housing.");
+        return;
+    }
+
     // Taking a shaft manually (stepping on a known shaft, or using shaft ability)
     const bool known_shaft = (!force_stair
                               && env.grid(you.pos()) == DNGN_TRAP_SHAFT)
