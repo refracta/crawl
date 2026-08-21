@@ -46,9 +46,10 @@ const string &housing_current_map_id();
 string housing_place();
 
 // Public snapshot compatibility is deliberately explicit: schema 4 adds
-// translucent owner-only barriers and schema 5 adds named passages plus
-// visitor inventory tiles. Maps without those capabilities remain schema 3
-// during rolling deployment; readers retain every validated prior format.
+// translucent owner-only barriers, schema 5 adds named passages plus visitor
+// inventory tiles, and schema 6 adds authenticated entrance appearances for
+// portals. Maps without those capabilities keep their lower schema during
+// rolling deployment; readers retain every validated prior format.
 int housing_snapshot_schema_version();
 bool housing_snapshot_schema_supported(int schema);
 
@@ -110,6 +111,10 @@ bool housing_can_edit(const coord_def &pos);
 // housing_ensure_level() once before using it for a batch or live preview.
 bool housing_can_edit_ensured(const coord_def &pos);
 bool housing_feature_allowed(dungeon_feature_type feat);
+// Native dungeon entrances remain unsafe as ordinary Housing terrain, but
+// their tiles may be selected as inert appearances for authenticated map and
+// same-level portals.
+bool housing_portal_skin_allowed(dungeon_feature_type feat);
 // Native Crawl stairs and branch/portal entrances have no valid destination
 // in a Housing level. This guard keeps legacy or malformed terrain from
 // leaving the Housing package; authenticated Housing portals are handled by
@@ -117,6 +122,8 @@ bool housing_feature_allowed(dungeon_feature_type feat);
 bool housing_blocks_native_transition(dungeon_feature_type feat);
 dungeon_feature_type housing_last_feature();
 void housing_set_last_feature(dungeon_feature_type feat);
+dungeon_feature_type housing_selected_portal_skin();
+void housing_set_selected_portal_skin(dungeon_feature_type feat);
 bool housing_valid_map_target(const string &target);
 // Create either an account:map travel portal or, when target contains no
 // colon, a persistent same-level passage named with the map-id rules.
@@ -124,15 +131,17 @@ bool housing_create_portal(const coord_def &pos, const string &target);
 bool housing_create_local_portal(const coord_def &pos,
                                  const string &portal_name);
 bool housing_local_portal_is_valid(const coord_def &pos);
+// Includes malformed reserved state so the `>` command can fail closed rather
+// than falling through to the inert substrate's native behaviour.
+bool housing_local_portal_is_reserved(const coord_def &pos);
 // Choose an unoccupied endpoint with the same authenticated name. The
 // optional flag distinguishes a fully occupied group from a singleton.
 bool housing_local_portal_destination(const coord_def &source,
                                       coord_def &destination,
                                       bool *occupied = nullptr);
-// Handle a marked same-level passage. Returning true means that the source
-// cell was a Housing fixture (including malformed or currently blocked ones)
-// and callers must not apply unrelated terrain behaviour.
-bool housing_trigger_local_portal(actor &triggerer);
+// Activate the named passage under the player. This is called only by the `>`
+// command; merely walking onto an endpoint never teleports actors.
+bool housing_take_local_portal();
 // Place and validate the owner-authored tile which destroys only a visitor
 // capsule's carried inventory. The owner and the published level are never
 // mutated by triggering it.

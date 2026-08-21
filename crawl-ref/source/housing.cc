@@ -77,6 +77,7 @@
 #include "teleport.h"
 #include "terrain.h"
 #include "tile-env.h"
+#include "tilepick.h"
 #include "tileview.h"
 #include "traps.h"
 #include "travel.h"
@@ -93,6 +94,8 @@ using std::map;
 
 static const char * const HOUSING_SPAWNS_KEY = "housing_spawn_points";
 static const char * const HOUSING_LAST_FEATURE_KEY = "housing_last_feature";
+static const char * const HOUSING_SELECTED_PORTAL_SKIN_KEY =
+    "housing_selected_portal_skin";
 static const char * const HOUSING_META_CHUNK = "housing_meta";
 static const char * const HOUSING_LEVEL_CHUNK = "level";
 static const char * const HOUSING_INDEX_CHUNK = "housing_index";
@@ -101,6 +104,8 @@ static const char * const HOUSING_THEME_CHUNK_PREFIX = "housing_theme_";
 static const char * const HOUSING_TEMPLATE_CHUNK = "housing_template";
 static const char * const HOUSING_PORTAL_TARGET_KEY = "housing_target";
 static const char * const HOUSING_LOCAL_PORTAL_KEY = "housing_portal_name";
+static const char * const HOUSING_PORTAL_SKIN_KEY =
+    "housing_portal_skin";
 static const char * const HOUSING_VISITOR_STRIP_KEY = "housing_visitor_strip";
 static const char * const HOUSING_LOCAL_PORTAL_TILE =
     "dngn_trap_golubria";
@@ -121,7 +126,12 @@ static const int HOUSING_SNAPSHOT_WALL_CURRENT_SCHEMA = 4;
 // inventory stripping tiles. Their inert rollback-safe terrain substrates do
 // not corrupt old canonical saves, while the public metadata gate prevents an
 // already-running older visitor process from silently ignoring their roles.
-static const int HOUSING_SNAPSHOT_SCHEMA = 5;
+static const int HOUSING_SNAPSHOT_MOVEMENT_SCHEMA = 5;
+// Schema 6 adds authenticated entrance-tile appearances to map portals and
+// named same-level passages. The underlying terrain remains the safe legacy
+// portal/arch substrate; older visitors must reject the extra visual role
+// rather than silently discarding it.
+static const int HOUSING_SNAPSHOT_SCHEMA = 6;
 static const int HOUSING_MAX_MONSTERS = 64;
 static const int HOUSING_MAX_SHOPS = 32;
 static const int HOUSING_MAX_LOCAL_PORTALS = 128;
@@ -292,6 +302,9 @@ static string _getenv_string(const char *name);
 static bool _ensure_owner_map_storage();
 static bool _housing_shop_can_be_published(const coord_def &pos);
 static bool _current_visitor_wall_marker_at(const coord_def &pos);
+static bool _marker_has_key(map_marker *marker, const char *key);
+static bool _portal_target_marker_at(const coord_def &pos, string *target,
+                                     dungeon_feature_type *skin);
 static bool _portal_target_at(const coord_def &pos, string *target);
 static bool _local_portal_name_at(const coord_def &pos, string *portal_name);
 static bool _visitor_strip_marker_at(const coord_def &pos);
@@ -738,6 +751,7 @@ static bool _supported_snapshot_schema(int schema)
            || schema == HOUSING_SNAPSHOT_WORLD_SCHEMA
            || schema == HOUSING_SNAPSHOT_WALL_SCHEMA
            || schema == HOUSING_SNAPSHOT_WALL_CURRENT_SCHEMA
+           || schema == HOUSING_SNAPSHOT_MOVEMENT_SCHEMA
            || schema == HOUSING_SNAPSHOT_SCHEMA;
 }
 
@@ -756,18 +770,24 @@ static void _write_snapshot_meta(package &snapshot, const string &account_id,
 {
     // Keep maps without new fixtures readable by already-running processes
     // during a rolling deployment. Translucent walls require schema 4, while
-    // named passages and visitor inventory strips require schema 5.
+    // named passages and visitor inventory strips require schema 5; a
+    // selected entrance appearance on either kind of portal requires 6.
     int schema = HOUSING_SNAPSHOT_WALL_SCHEMA;
     for (map_marker *marker : env.markers.get_all())
     {
-        if (_local_portal_name_at(marker->pos, nullptr)
-            || _visitor_strip_marker_at(marker->pos))
+        if (_marker_has_key(marker, HOUSING_PORTAL_SKIN_KEY))
         {
             schema = HOUSING_SNAPSHOT_SCHEMA;
             break;
         }
+        if (_local_portal_name_at(marker->pos, nullptr)
+            || _visitor_strip_marker_at(marker->pos))
+        {
+            schema = std::max(schema, HOUSING_SNAPSHOT_MOVEMENT_SCHEMA);
+        }
         if (_current_visitor_wall_marker_at(marker->pos))
-            schema = HOUSING_SNAPSHOT_WALL_CURRENT_SCHEMA;
+            schema = std::max(schema,
+                              HOUSING_SNAPSHOT_WALL_CURRENT_SCHEMA);
     }
     writer output(&snapshot, HOUSING_META_CHUNK);
     marshallInt(output, schema);
@@ -1256,8 +1276,68 @@ static bool _set_feature_tile_override(const coord_def &pos,
     return true;
 }
 
+static tileidx_t _housing_portal_skin_tile(dungeon_feature_type feat)
+{
+    // The ordinary Zot entrance changes after Zot has been visited. Housing
+    // portal appearances are persistent map data, so choose the closed form
+    // deterministically instead of depending on each visitor's travel state.
+    if (feat == DNGN_ENTER_ZOT)
+        return TILE_DNGN_ENTER_ZOT_CLOSED;
+    // These compatibility/special-mode entrances have no dedicated base tile
+    // in tileidx_feature_base(). Use Crawl's ordinary portal artwork rather
+    // than exposing the error tile in the Housing selector.
+    if (feat == DNGN_ENTER_LABYRINTH || feat == DNGN_ENTER_ARENA
+        || feat == DNGN_ENTER_CRUCIBLE)
+    {
+        return TILE_DNGN_PORTAL;
+    }
+    return tileidx_feature_base(feat);
+}
+
+static bool _portal_skin_from_marker(map_marker *marker,
+                                     dungeon_feature_type *skin)
+{
+    if (!_marker_has_key(marker, HOUSING_PORTAL_SKIN_KEY))
+    {
+        if (skin)
+            *skin = DNGN_UNSEEN;
+        return true;
+    }
+
+    const string name = marker->property(HOUSING_PORTAL_SKIN_KEY);
+    const dungeon_feature_type feat = dungeon_feature_by_name(name);
+    if (feat == DNGN_UNSEEN || !housing_portal_skin_allowed(feat)
+        || name != dungeon_feature_name(feat))
+    {
+        return false;
+    }
+    if (skin)
+        *skin = feat;
+    return true;
+}
+
+static const char *_portal_skin_tile_name(dungeon_feature_type skin)
+{
+    return tile_dngn_name(_housing_portal_skin_tile(skin));
+}
+
+static bool _portal_skin_override_at(const coord_def &pos,
+                                     dungeon_feature_type skin)
+{
+    return skin != DNGN_UNSEEN
+        && _feature_tile_override_at(pos, _portal_skin_tile_name(skin));
+}
+
+static bool _set_portal_skin_override(const coord_def &pos,
+                                      dungeon_feature_type skin)
+{
+    return skin != DNGN_UNSEEN
+        && _set_feature_tile_override(pos, _portal_skin_tile_name(skin));
+}
+
 static bool _local_portal_marker_at(const coord_def &pos,
-                                    string *portal_name)
+                                    string *portal_name,
+                                    dungeon_feature_type *skin = nullptr)
 {
     if (!map_bounds(pos) || env.grid(pos) != DNGN_STONE_ARCH)
         return false;
@@ -1269,12 +1349,20 @@ static bool _local_portal_marker_at(const coord_def &pos,
         return false;
     }
     const string name = markers.front()->property(HOUSING_LOCAL_PORTAL_KEY);
-    const map<string, string> expected =
+    dungeon_feature_type marker_skin = DNGN_UNSEEN;
+    if (!_portal_skin_from_marker(markers.front(), &marker_skin))
+        return false;
+    map<string, string> expected =
     {
         { HOUSING_LOCAL_PORTAL_KEY, name },
         { "feature_description", "housing passage " + name },
         { "veto_destroy", "veto" },
     };
+    if (marker_skin != DNGN_UNSEEN)
+    {
+        expected[HOUSING_PORTAL_SKIN_KEY] =
+            dungeon_feature_name(marker_skin);
+    }
     if (!_is_map_id(name)
         || !_marker_properties_are(markers.front(), expected))
     {
@@ -1282,24 +1370,40 @@ static bool _local_portal_marker_at(const coord_def &pos,
     }
     if (portal_name)
         *portal_name = name;
+    if (skin)
+        *skin = marker_skin;
     return true;
 }
 
 static bool _local_portal_name_at(const coord_def &pos, string *portal_name)
 {
-    return _local_portal_marker_at(pos, portal_name)
-        && _feature_tile_override_at(pos, HOUSING_LOCAL_PORTAL_TILE);
+    dungeon_feature_type skin = DNGN_UNSEEN;
+    if (!_local_portal_marker_at(pos, portal_name, &skin))
+        return false;
+    return skin == DNGN_UNSEEN
+        ? _feature_tile_override_at(pos, HOUSING_LOCAL_PORTAL_TILE)
+        : _portal_skin_override_at(pos, skin);
 }
 
 static void _restore_housing_fixture_tile_overrides()
 {
     for (map_marker *marker : env.markers.get_all())
     {
-        if (_local_portal_marker_at(marker->pos, nullptr)
-            && !_set_feature_tile_override(marker->pos,
-                                           HOUSING_LOCAL_PORTAL_TILE))
+        dungeon_feature_type skin = DNGN_UNSEEN;
+        if (_local_portal_marker_at(marker->pos, nullptr, &skin))
         {
-            fail("Housing passage tile is unavailable");
+            const bool restored = skin == DNGN_UNSEEN
+                ? _set_feature_tile_override(marker->pos,
+                                             HOUSING_LOCAL_PORTAL_TILE)
+                : _set_portal_skin_override(marker->pos, skin);
+            if (!restored)
+                fail("Housing passage tile is unavailable");
+        }
+        else if (_portal_target_marker_at(marker->pos, nullptr, &skin)
+                 && skin != DNGN_UNSEEN
+                 && !_set_portal_skin_override(marker->pos, skin))
+        {
+            fail("Housing portal appearance is unavailable");
         }
     }
 }
@@ -2399,6 +2503,20 @@ bool housing_feature_allowed(dungeon_feature_type feat)
     }
 }
 
+bool housing_portal_skin_allowed(dungeon_feature_type feat)
+{
+    if (!is_valid_feature_type(feat) || feat == DNGN_ENTER_SHOP)
+        return false;
+
+    const char * const name = dungeon_feature_name(feat);
+    if (!name || !starts_with(name, "enter_"))
+        return false;
+
+    // Every advertised name must resolve through the deterministic skin table
+    // above; this also catches future enter_* enums without artwork.
+    return _housing_portal_skin_tile(feat) != TILE_DNGN_ERROR;
+}
+
 bool housing_blocks_native_transition(dungeon_feature_type feat)
 {
     if (!crawl_state.game_is_housing() || !is_valid_feature_type(feat))
@@ -2427,9 +2545,31 @@ void housing_set_last_feature(dungeon_feature_type feat)
         return;
     you.props.erase(HOUSING_LAST_FEATURE_KEY);
     you.props[HOUSING_LAST_FEATURE_KEY] = static_cast<int>(feat);
+    you.props.erase(HOUSING_SELECTED_PORTAL_SKIN_KEY);
 }
 
-static bool _portal_target_at(const coord_def &pos, string *target)
+dungeon_feature_type housing_selected_portal_skin()
+{
+    if (!you.props.exists(HOUSING_SELECTED_PORTAL_SKIN_KEY)
+        || you.props[HOUSING_SELECTED_PORTAL_SKIN_KEY].get_type() != SV_INT)
+    {
+        return DNGN_UNSEEN;
+    }
+    const auto feat = static_cast<dungeon_feature_type>(
+        you.props[HOUSING_SELECTED_PORTAL_SKIN_KEY].get_int());
+    return housing_portal_skin_allowed(feat) ? feat : DNGN_UNSEEN;
+}
+
+void housing_set_selected_portal_skin(dungeon_feature_type feat)
+{
+    if (!housing_portal_skin_allowed(feat))
+        return;
+    you.props.erase(HOUSING_SELECTED_PORTAL_SKIN_KEY);
+    you.props[HOUSING_SELECTED_PORTAL_SKIN_KEY] = static_cast<int>(feat);
+}
+
+static bool _portal_target_marker_at(const coord_def &pos, string *target,
+                                     dungeon_feature_type *skin)
 {
     if (!map_bounds(pos) || env.grid(pos) != DNGN_ENTER_PORTAL_VAULT)
         return false;
@@ -2437,23 +2577,41 @@ static bool _portal_target_at(const coord_def &pos, string *target)
     const vector<map_marker*> markers = env.markers.get_markers_at(pos);
     if (markers.size() != 1)
         return false;
-    const string value = markers.front()->property(HOUSING_PORTAL_TARGET_KEY);
-    const map<string, string> expected =
+    map_marker * const marker = markers.front();
+    const string value = marker->property(HOUSING_PORTAL_TARGET_KEY);
+    dungeon_feature_type marker_skin = DNGN_UNSEEN;
+    if (!_portal_skin_from_marker(marker, &marker_skin))
+        return false;
+    map<string, string> expected =
     {
         { HOUSING_PORTAL_TARGET_KEY, value },
         { "feature_description", "housing portal to " + value },
         { "veto_destroy", "veto" },
     };
+    if (marker_skin != DNGN_UNSEEN)
+    {
+        expected[HOUSING_PORTAL_SKIN_KEY] =
+            dungeon_feature_name(marker_skin);
+    }
     if (!housing_valid_map_target(value)
-        || !_marker_has_only_fixture_role(markers.front(),
+        || !_marker_has_only_fixture_role(marker,
                                           HOUSING_PORTAL_TARGET_KEY)
-        || !_marker_properties_are(markers.front(), expected))
+        || !_marker_properties_are(marker, expected))
     {
         return false;
     }
     if (target)
         *target = value;
+    if (skin)
+        *skin = marker_skin;
     return true;
+}
+
+static bool _portal_target_at(const coord_def &pos, string *target)
+{
+    dungeon_feature_type skin = DNGN_UNSEEN;
+    return _portal_target_marker_at(pos, target, &skin)
+        && (skin == DNGN_UNSEEN || _portal_skin_override_at(pos, skin));
 }
 
 bool housing_portal_is_valid(const coord_def &pos)
@@ -2465,6 +2623,12 @@ bool housing_local_portal_is_valid(const coord_def &pos)
 {
     return crawl_state.game_is_housing()
         && _local_portal_name_at(pos, nullptr);
+}
+
+bool housing_local_portal_is_reserved(const coord_def &pos)
+{
+    return crawl_state.game_is_housing()
+        && _housing_local_portal_state_at(pos);
 }
 
 bool housing_visitor_strip_is_valid(const coord_def &pos)
@@ -2479,6 +2643,21 @@ static int _housing_local_portal_count()
         if (_marker_has_key(marker, HOUSING_LOCAL_PORTAL_KEY))
             ++count;
     return count;
+}
+
+static dungeon_feature_type _selected_housing_portal_skin()
+{
+    return housing_selected_portal_skin();
+}
+
+static void _set_portal_skin_marker_property(map_wiz_props_marker *marker,
+                                             dungeon_feature_type skin)
+{
+    if (skin != DNGN_UNSEEN)
+    {
+        marker->set_property(HOUSING_PORTAL_SKIN_KEY,
+                             dungeon_feature_name(skin));
+    }
 }
 
 bool housing_create_local_portal(const coord_def &pos,
@@ -2503,8 +2682,12 @@ bool housing_create_local_portal(const coord_def &pos,
     if (!housing_authorize_action("create a named passage", 0))
         return false;
 
+    const dungeon_feature_type skin = _selected_housing_portal_skin();
     dungeon_terrain_changed(pos, DNGN_STONE_ARCH, false, false, true);
-    if (!_set_feature_tile_override(pos, HOUSING_LOCAL_PORTAL_TILE))
+    const bool tile_set = skin == DNGN_UNSEEN
+        ? _set_feature_tile_override(pos, HOUSING_LOCAL_PORTAL_TILE)
+        : _set_portal_skin_override(pos, skin);
+    if (!tile_set)
     {
         _clear_housing_cell_to_floor(pos);
         fail("Housing passage tile is unavailable");
@@ -2514,9 +2697,16 @@ bool housing_create_local_portal(const coord_def &pos,
     marker->set_property("feature_description",
                          "housing passage " + portal_name);
     marker->set_property("veto_destroy", "veto");
+    _set_portal_skin_marker_property(marker, skin);
     env.markers.add(marker);
-    mprf("A named Housing passage '%s' is created.",
-         portal_name.c_str());
+    if (skin == DNGN_UNSEEN)
+        mprf("A named Housing passage '%s' is created.", portal_name.c_str());
+    else
+    {
+        mprf("A named Housing passage '%s' is created with the '%s' "
+             "appearance.", portal_name.c_str(),
+             dungeon_feature_name(skin));
+    }
     return true;
 }
 
@@ -2561,14 +2751,26 @@ bool housing_create_portal(const coord_def &pos, const string &target)
     if (!housing_authorize_action("create a portal", 0))
         return false;
 
+    const dungeon_feature_type skin = _selected_housing_portal_skin();
     dungeon_terrain_changed(pos, DNGN_ENTER_PORTAL_VAULT,
                             false, false, true);
+    if (skin != DNGN_UNSEEN && !_set_portal_skin_override(pos, skin))
+    {
+        _clear_housing_cell_to_floor(pos);
+        fail("Housing portal appearance is unavailable");
+    }
     auto *marker = new map_wiz_props_marker(pos);
     marker->set_property(HOUSING_PORTAL_TARGET_KEY, target);
     marker->set_property("feature_description",
                          "housing portal to " + target);
     marker->set_property("veto_destroy", "veto");
+    _set_portal_skin_marker_property(marker, skin);
     env.markers.add(marker);
+    if (skin != DNGN_UNSEEN)
+    {
+        mprf("A Housing portal is created with the '%s' appearance.",
+             dungeon_feature_name(skin));
+    }
     return true;
 }
 
@@ -2605,47 +2807,34 @@ bool housing_local_portal_destination(const coord_def &source,
     return true;
 }
 
-bool housing_trigger_local_portal(actor &triggerer)
+bool housing_take_local_portal()
 {
     if (!crawl_state.game_is_housing()
-        || !_housing_local_portal_state_at(triggerer.pos()))
+        || !_housing_local_portal_state_at(you.pos()))
     {
         return false;
     }
 
     string portal_name;
-    if (!_local_portal_name_at(triggerer.pos(), &portal_name))
+    if (!_local_portal_name_at(you.pos(), &portal_name))
     {
-        if (triggerer.is_player())
-            mprf(MSGCH_ERROR, "This named Housing passage is malformed.");
+        mprf(MSGCH_ERROR, "This named Housing passage is malformed.");
         return true;
     }
-    if (!you.see_cell_no_trans(triggerer.pos()))
-        return true;
-
-    monster *mons = triggerer.as_monster();
-    if (mons && mons_is_tentacle_or_tentacle_segment(mons->type))
-        return true;
 
     bool occupied_destination = false;
     coord_def destination;
-    if (!housing_local_portal_destination(triggerer.pos(), destination,
+    if (!housing_local_portal_destination(you.pos(), destination,
                                           &occupied_destination))
     {
-        if (triggerer.is_player())
-        {
-            mprf("This passage %s!", occupied_destination
-                 ? "seems to be blocked by something"
-                 : "doesn't lead anywhere");
-        }
+        mprf("This passage %s!", occupied_destination
+             ? "seems to be blocked by something"
+             : "doesn't lead anywhere");
         return true;
     }
 
-    if (triggerer.is_player())
-        mprf("You enter the Housing passage '%s'.", portal_name.c_str());
-    else
-        simple_monster_message(*mons, " enters a Housing passage.");
-    if (!triggerer.move_to(destination, MV_TRANSLOCATION | MV_GOLUBRIA))
+    mprf("You enter the Housing passage '%s'.", portal_name.c_str());
+    if (!you.move_to(destination, MV_TRANSLOCATION | MV_GOLUBRIA))
         fail("Housing passage destination became unavailable");
     return true;
 }

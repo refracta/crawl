@@ -1121,9 +1121,15 @@ a portal to another Housing map, or target an empty ordinary floor and enter a
 portal_name (using the same letters, digits, underscores, and length rules as a
 Housing map name) to create a passage within the current map.
 
+Selecting an enter_* name with Set housing terrain changes the appearance of
+both kinds of portal without giving them the native dungeon entrance's
+destination or side effects. Selecting ordinary terrain restores the default
+portal appearances.
+
 Two passages with the same name lead to one another. If more than two share a
-name, entering one chooses another unoccupied endpoint at random. A lone
-endpoint remains inert until another endpoint with the same name is placed.
+name, pressing > while standing on one chooses another unoccupied endpoint at
+random. Walking onto a passage never activates it. A lone endpoint remains
+inert until another endpoint with the same name is placed.
 Clear housing terrain can remove any endpoint. After entering the destination
 or passage name once, Space, Enter, and . place additional portals while
 keeping the targeting cursor open; press Esc when finished.
@@ -1154,9 +1160,10 @@ Chooses the terrain used by Build housing terrain. You may type all or part of
 a terrain name; if several available Housing terrains match, type one exact
 name from the displayed list. Spaces and underscores are both accepted.
 
-Native dungeon entrances and exits cannot be built in Housing. Use Create a
-housing portal for travel, or choose stone_arch or expired_portal for a
-decorative entrance.
+An enter_* selection is instead remembered as the appearance for subsequently
+created map portals and named same-level passages. Their travel remains the
+safe Housing portal action; the native dungeon entrance is never activated.
+Dungeon exits cannot be selected.
 %%%%
 Build housing terrain ability
 

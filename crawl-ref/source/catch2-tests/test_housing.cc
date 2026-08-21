@@ -273,6 +273,7 @@ TEST_CASE("Housing branch theme ids and menu order are stable",
 TEST_CASE("Housing terrain permits decorative hazards and altars safely",
           "[single-file]")
 {
+    init_show_table();
     REQUIRE(housing_feature_allowed(DNGN_SHALLOW_WATER));
     REQUIRE(housing_feature_allowed(DNGN_DEEP_WATER));
     REQUIRE(housing_feature_allowed(DNGN_LAVA));
@@ -291,6 +292,14 @@ TEST_CASE("Housing terrain permits decorative hazards and altars safely",
     REQUIRE_FALSE(housing_feature_allowed(DNGN_UNKNOWN_ALTAR));
     REQUIRE_FALSE(housing_feature_allowed(DNGN_TRAP_TELEPORT));
     REQUIRE_FALSE(housing_feature_allowed(DNGN_ENTER_LAIR));
+    REQUIRE(housing_portal_skin_allowed(DNGN_ENTER_LAIR));
+    REQUIRE(housing_portal_skin_allowed(DNGN_ENTER_PANDEMONIUM));
+    REQUIRE(housing_portal_skin_allowed(DNGN_ENTER_PORTAL_VAULT));
+    REQUIRE(housing_portal_skin_allowed(DNGN_ENTER_LABYRINTH));
+    REQUIRE(housing_portal_skin_allowed(DNGN_ENTER_ARENA));
+    REQUIRE(housing_portal_skin_allowed(DNGN_ENTER_CRUCIBLE));
+    REQUIRE_FALSE(housing_portal_skin_allowed(DNGN_ENTER_SHOP));
+    REQUIRE_FALSE(housing_portal_skin_allowed(DNGN_EXIT_LAIR));
     REQUIRE_FALSE(housing_feature_allowed(DNGN_ORB_DAIS));
     REQUIRE_FALSE(housing_feature_allowed(DNGN_MOULD_PATCH));
 }
@@ -307,13 +316,22 @@ TEST_CASE("Housing terrain search advertises only usable features",
 
     const vector<string> all_entrances = dungeon_feature_matches("enter_");
     REQUIRE_FALSE(all_entrances.empty());
-    REQUIRE(wizard_feature_matches("enter_", true).empty());
+    vector<string> expected_portal_skins;
     for (const string &name : all_entrances)
     {
         const dungeon_feature_type feat = dungeon_feature_by_name(name);
         REQUIRE(feat != DNGN_UNSEEN);
         REQUIRE_FALSE(housing_feature_allowed(feat));
+        if (name == "enter_shop")
+            REQUIRE_FALSE(housing_portal_skin_allowed(feat));
+        else
+        {
+            REQUIRE(housing_portal_skin_allowed(feat));
+            expected_portal_skins.push_back(name);
+        }
     }
+    REQUIRE(wizard_feature_matches("enter_", true)
+            == expected_portal_skins);
 
 #if TAG_MAJOR_VERSION == 34
     // Disabled gods are parsed as floor by the legacy feature lookup. They
@@ -725,14 +743,15 @@ TEST_CASE("Housing terrain brush geometry and size controls are stable",
 TEST_CASE("Housing snapshot schema is explicit and backwards compatible",
           "[single-file]")
 {
-    REQUIRE(housing_snapshot_schema_version() == 5);
+    REQUIRE(housing_snapshot_schema_version() == 6);
     REQUIRE(housing_snapshot_schema_supported(1));
     REQUIRE(housing_snapshot_schema_supported(2));
     REQUIRE(housing_snapshot_schema_supported(3));
     REQUIRE(housing_snapshot_schema_supported(4));
     REQUIRE(housing_snapshot_schema_supported(5));
+    REQUIRE(housing_snapshot_schema_supported(6));
     REQUIRE_FALSE(housing_snapshot_schema_supported(0));
-    REQUIRE_FALSE(housing_snapshot_schema_supported(6));
+    REQUIRE_FALSE(housing_snapshot_schema_supported(7));
     REQUIRE_FALSE(housing_snapshot_schema_supported(INT_MAX));
 }
 
@@ -1916,6 +1935,84 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         REQUIRE_FALSE(housing_portal_is_valid(ambiguous_spawn));
     }
 
+    SECTION("selected entrance appearances skin both portal kinds safely")
+    {
+        unwind_var<CrawlHashTable> saved_you_props(you.props);
+        housing_ensure_level(false);
+        you.position = template_spawn;
+        crawl_view.set_player_at(template_spawn);
+
+        housing_set_last_feature(DNGN_DEEP_WATER);
+        REQUIRE(housing_last_feature() == DNGN_DEEP_WATER);
+        REQUIRE(housing_selected_portal_skin() == DNGN_UNSEEN);
+        housing_set_selected_portal_skin(DNGN_ENTER_LAIR);
+        REQUIRE(housing_last_feature() == DNGN_DEEP_WATER);
+        REQUIRE(housing_selected_portal_skin() == DNGN_ENTER_LAIR);
+
+        REQUIRE(housing_create_portal(old_start, "Owner:main"));
+        REQUIRE(housing_create_portal(ambiguous_spawn, "garden"));
+        REQUIRE(housing_create_portal(third_passage, "garden"));
+        REQUIRE(env.grid(old_start) == DNGN_ENTER_PORTAL_VAULT);
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_STONE_ARCH);
+        REQUIRE(env.grid(third_passage) == DNGN_STONE_ARCH);
+        REQUIRE(tile_env.flv(old_start).feat == TILE_DNGN_ENTER_LAIR);
+        REQUIRE(tile_env.flv(ambiguous_spawn).feat == TILE_DNGN_ENTER_LAIR);
+        REQUIRE(tile_env.flv(third_passage).feat == TILE_DNGN_ENTER_LAIR);
+        REQUIRE(housing_portal_is_valid(old_start));
+        REQUIRE(housing_local_portal_is_valid(ambiguous_spawn));
+        REQUIRE(housing_local_portal_is_valid(third_passage));
+        REQUIRE(env.markers.get_markers_at(old_start).front()->property(
+                    "housing_portal_skin") == "enter_lair");
+        REQUIRE(env.markers.get_markers_at(ambiguous_spawn).front()->property(
+                    "housing_portal_skin") == "enter_lair");
+        REQUIRE(housing_validate_current_map().valid());
+
+        // The marker and exact tile override authenticate one another.
+        tile_env.flv(ambiguous_spawn).feat = TILE_DNGN_STONE_ARCH;
+        REQUIRE_FALSE(housing_local_portal_is_valid(ambiguous_spawn));
+        REQUIRE_FALSE(housing_validate_current_map().valid());
+        tile_env.flv(ambiguous_spawn).feat = TILE_DNGN_ENTER_LAIR;
+        REQUIRE(housing_local_portal_is_valid(ambiguous_spawn));
+        REQUIRE(housing_validate_current_map().valid());
+
+        auto *local_marker = static_cast<map_wiz_props_marker *>(
+            env.markers.get_markers_at(ambiguous_spawn).front());
+        local_marker->set_property("housing_portal_skin", "not_an_entrance");
+        REQUIRE_FALSE(housing_local_portal_is_valid(ambiguous_spawn));
+        REQUIRE_FALSE(housing_validate_current_map().valid());
+        local_marker->set_property("housing_portal_skin", "enter_lair");
+        REQUIRE(housing_local_portal_is_valid(ambiguous_spawn));
+        REQUIRE(housing_validate_current_map().valid());
+
+        // Selecting ordinary build terrain restores default portal styling
+        // without losing the independent terrain brush selection.
+        housing_set_last_feature(DNGN_FLOOR);
+        REQUIRE(housing_last_feature() == DNGN_FLOOR);
+        REQUIRE(housing_selected_portal_skin() == DNGN_UNSEEN);
+    }
+
+    SECTION("dynamic and compatibility entrances have deterministic skins")
+    {
+        unwind_var<CrawlHashTable> saved_you_props(you.props);
+        housing_ensure_level(false);
+        you.position = template_spawn;
+        crawl_view.set_player_at(template_spawn);
+
+        housing_set_selected_portal_skin(DNGN_ENTER_ZOT);
+        REQUIRE(housing_create_portal(ambiguous_spawn, "zot_gate"));
+        REQUIRE(env.grid(ambiguous_spawn) == DNGN_STONE_ARCH);
+        REQUIRE(tile_env.flv(ambiguous_spawn).feat
+                == TILE_DNGN_ENTER_ZOT_CLOSED);
+        REQUIRE(housing_local_portal_is_valid(ambiguous_spawn));
+
+        housing_set_selected_portal_skin(DNGN_ENTER_LABYRINTH);
+        REQUIRE(housing_create_portal(third_passage, "maze_gate"));
+        REQUIRE(env.grid(third_passage) == DNGN_STONE_ARCH);
+        REQUIRE(tile_env.flv(third_passage).feat == TILE_DNGN_PORTAL);
+        REQUIRE(housing_local_portal_is_valid(third_passage));
+        REQUIRE(housing_validate_current_map().valid());
+    }
+
     SECTION("named Housing passages persist and route matching pairs")
     {
         housing_ensure_level(false);
@@ -2017,7 +2114,7 @@ TEST_CASE("Housing chargen adopts and starts on the visible template spawn",
         you.position = ambiguous_spawn;
         crawl_view.set_player_at(ambiguous_spawn);
         REQUIRE(housing_movement_fixture_is_reserved(ambiguous_spawn));
-        REQUIRE(housing_trigger_local_portal(you));
+        REQUIRE(housing_take_local_portal());
         REQUIRE(you.pos() == ambiguous_spawn);
         REQUIRE(env.grid(ambiguous_spawn) == DNGN_PASSAGE_OF_GOLUBRIA);
         REQUIRE(env.markers.get_markers_at(ambiguous_spawn).size() == 1);

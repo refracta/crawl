@@ -891,20 +891,14 @@ void player::finalise_movement(const actor* /*to_blame*/)
 
         apply_cloud_trail(last_move_pos);
 
-        const bool handled_housing_passage =
-            !(last_move_flags & MV_GOLUBRIA)
-            && housing_trigger_local_portal(you);
-        if (pos() != start_pos)
-        {
-            clear_deferred_move();
-            return;
-        }
-        const bool handled_housing_strip = !handled_housing_passage
-            && housing_trigger_visitor_strip(you);
+        // Named Housing passages are deliberate `>` actions. Walking onto
+        // one only reserves the cell from unrelated trap/sigil behaviour.
+        const bool handled_housing_strip =
+            housing_trigger_visitor_strip(you);
 
         // Traps go off.
         // (But not when losing flight - i.e., moving into the same tile)
-        if (!handled_housing_passage && !handled_housing_strip
+        if (!reserved_housing_movement_fixture && !handled_housing_strip
             && (env.grid(pos()) != DNGN_PASSAGE_OF_GOLUBRIA
                 || !(last_move_flags & MV_GOLUBRIA)))
         {

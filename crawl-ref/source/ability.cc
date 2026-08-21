@@ -4391,15 +4391,26 @@ static spret _do_ability(const ability_def& abil, bool fail, dist *target,
         const auto feat = wizard_select_housing_feature();
         if (feat == DNGN_UNSEEN)
             return spret::abort;
-        if (!housing_feature_allowed(feat))
+        if (!housing_feature_allowed(feat)
+            && !housing_portal_skin_allowed(feat))
         {
             mpr("That terrain is not available in Housing.");
             return spret::abort;
         }
         if (!housing_authorize_action("terrain", 0))
             return spret::abort;
-        housing_set_last_feature(feat);
-        mprf("Now building '%s'", dungeon_feature_name(feat));
+        if (housing_portal_skin_allowed(feat))
+        {
+            housing_set_selected_portal_skin(feat);
+            mprf("Housing portals will now use the '%s' appearance. "
+                 "Create a Housing portal to place one.",
+                 dungeon_feature_name(feat));
+        }
+        else
+        {
+            housing_set_last_feature(feat);
+            mprf("Now building '%s'", dungeon_feature_name(feat));
+        }
         housing_checkpoint();
         break;
     }

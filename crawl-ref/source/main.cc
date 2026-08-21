@@ -1369,6 +1369,23 @@ static void _input()
 static bool _can_take_stairs(dungeon_feature_type ftype, bool down,
                              bool known_shaft)
 {
+    // Reserved named-passage state must win even if a damaged marker was
+    // attached to a shop, altar, trap, or other active native substrate.
+    if (housing_local_portal_is_reserved(you.pos()))
+    {
+        if (!down)
+        {
+            mpr("Use > to enter a named Housing passage.");
+            return false;
+        }
+        if (you.cannot_move())
+        {
+            canned_msg(MSG_CANNOT_MOVE);
+            return false;
+        }
+        return true;
+    }
+
     // Up and down both work for shops, portals, and altars.
     if (ftype == DNGN_ENTER_SHOP || feat_is_altar(ftype)
         || ftype == DNGN_PURIFIED_MUTATION_CATALYST)
@@ -1713,6 +1730,8 @@ static void _take_stairs(bool down)
     ASSERT(!crawl_state.arena_suspended);
 
     const dungeon_feature_type ygrd = env.grid(you.pos());
+    const bool housing_passage =
+        down && housing_local_portal_is_reserved(you.pos());
 
     const bool shaft = (down && env.grid(you.pos()) == DNGN_TRAP_SHAFT);
 
@@ -1727,7 +1746,7 @@ static void _take_stairs(bool down)
     }
 
     if (!(!cancel_harmful_move()
-          && _prompt_stairs(ygrd, down, shaft)
+          && (housing_passage || _prompt_stairs(ygrd, down, shaft))
           && you.attempt_escape())) // false means constricted and don't escape
     {
         return;
@@ -1736,7 +1755,14 @@ static void _take_stairs(bool down)
     you.stop_constricting_all(true);
     you.stop_being_constricted();
 
-    if (shaft)
+    if (housing_passage)
+    {
+        const coord_def old_pos = you.pos();
+        if (!housing_take_local_portal())
+            fail("Housing passage state changed during activation");
+        you.turn_is_over = you.pos() != old_pos;
+    }
+    else if (shaft)
         start_delay<DescendingStairsDelay>(0);
     else if (ygrd == DNGN_TRANSPORTER)
         _take_transporter();

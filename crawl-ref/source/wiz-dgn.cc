@@ -409,7 +409,7 @@ void wizard_interlevel_travel()
 
 bool wizard_housing_feature_selectable(dungeon_feature_type feat)
 {
-    if (!housing_feature_allowed(feat))
+    if (!housing_feature_allowed(feat) && !housing_portal_skin_allowed(feat))
         return false;
 
     const char * const name = dungeon_feature_name(feat);
@@ -445,9 +445,10 @@ static void _explain_unavailable_housing_feature(const string &name)
 {
     if (_looks_like_feature_entrance(name))
     {
-        mpr("Native dungeon entrances and exits cannot be built in Housing. "
-            "Use Create a Housing portal/passage for travel, or build "
-            "stone_arch or expired_portal for decoration.");
+        mpr("Native dungeon entrances cannot be built as ordinary Housing "
+            "terrain. Select an enter_* name as a portal appearance, then "
+            "use Create a Housing portal/passage. Dungeon exits remain "
+            "unavailable.");
     }
     else
         mpr("That terrain is not available in Housing.");
@@ -464,7 +465,8 @@ static dungeon_feature_type _wizard_select_feature(bool mimic,
         if (mimic)
             mprf(MSGCH_PROMPT, "Create what kind of feature mimic? ");
         else if (housing_only)
-            mprf(MSGCH_PROMPT, "Choose which Housing terrain? ");
+            mprf(MSGCH_PROMPT,
+                 "Choose Housing terrain or portal appearance? ");
         else
             mprf(MSGCH_PROMPT, "Create which feature? ");
 
